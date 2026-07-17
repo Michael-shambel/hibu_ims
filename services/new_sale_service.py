@@ -1,0 +1,1717 @@
+#!/usr/bin/env python
+import logging
+from sys import flags
+from unittest import result
+from sqlalchemy import func, case, or_
+from sqlalchemy.orm import joinedload
+from services.base_service import BaseService, get_session
+from services.new_sale_item_service import NewSaleItemService
+from services.new_batch_transaction_service import NewBachTransactionService
+from services.sale_payment_term_service import SalePaymentTermService
+from services.payment_transaction_service import PaymentTransactionService
+from services.bank_account_service import BankAccountService
+from services.daily_sales_cache_service import DailySalesCacheService
+from services.bank_transaction_service import BankTransactionService
+from models.new_sales import ProfessionalSale
+from models.batch_transaction import TransactionType, BatchTransaction
+from models.payment_transaction import PaymentMethodEnum, PaymentTransaction
+from models.product_batch import ProductBatch
+from models.sale_payment_term import SalePaymentTerm, PaymentStatusEnum
+from models.new_sale_item import ProfessionalSaleItem
+from models.bank_transactions import BankTransaction
+from models.new_product import ProfessionalProduct
+from models.customer_daily_notification import CustomerDailyNotification
+from typing import List, Dict, Optional, Tuple, Any
+from datetime import date, datetime, time, timedelta
+from models.customers import Customer
+from sqlalchemy import or_
+
+logger = logging.getLogger(__name__)
+
+class NewSaleService(BaseService[ProfessionalSale]):
+    def __init__(self):
+        super().__init__(ProfessionalSale)
+        self.sale_item_service = NewSaleItemService()
+        self.new_batch_transaction_service = NewBachTransactionService()
+        self.sale_payment_term_service = SalePaymentTermService()
+        self.payment_transaction_service = PaymentTransactionService()
+        self.account_service = BankAccountService()
+        self.bank_transaction_service = BankTransactionService()
+        self._cash_account_id = None
+
+    def create_sale(
+        self,
+        customer_id: int,
+        sale_items: List[Dict],
+        user_id: int,
+        labour_expense: float,
+        payment_type: str,
+        credit_term_days: Optional[int] = None,
+        payments: List[Dict] = None,
+        delivery_name: Optional[str] = None,
+        delivery_place: Optional[str] = None,
+        delivery_phone: Optional[str] = None,
+        delivery_plate: Optional[str] = None,
+        sale_date: Optional[datetime] = None
+    ):
+        with get_session() as session:
+            try:
+                requested_qty_by_batch = {}
+                for item in sale_items:
+                    quantity = int(item.get('quantity', 0) or 0)
+                    batch_id = item.get('batch_id')
+
+                    if quantity <= 0:
+                        raise ValueError(f"Invalid sale quantity {quantity} for batch {batch_id}")
+
+                    requested_qty_by_batch[batch_id] = requested_qty_by_batch.get(batch_id, 0) + quantity
+
+                for batch_id, requested_qty in requested_qty_by_batch.items():
+                    batch = (
+                        session.query(ProductBatch)
+                        .filter(
+                            ProductBatch.id == batch_id,
+                            ProductBatch.is_deleted == False
+                        )
+                        .first()
+                    )
+
+                    if not batch:
+                        raise ValueError(f"Batch {batch_id} not found")
+
+                    if requested_qty > batch.available_quantity:
+                        raise ValueError(
+                            f"Insufficient stock for batch {batch_id}: requested {requested_qty}, available {batch.available_quantity}"
+                        )
+
+                total_amount = sum(item['quantity'] * item['dozen'] * item['unit_price'] for item in sale_items)
+                payment_term_total = total_amount + labour_expense
+                is_credit = False
+                if payment_type.lower() == PaymentStatusEnum.CREDIT:
+                    is_credit = True
+                    # total_amount += labour_expense
+                
+
+                sale = ProfessionalSale(
+                    customer_id=customer_id,
+                    total_amount=total_amount,
+                    is_credit_sale = is_credit,
+                    labour_expense=labour_expense,
+                    user_id=user_id,
+                    delivery_name=delivery_name,
+                    delivery_place=delivery_place,
+                    delivery_phone=delivery_phone,
+                    delivery_Plate=delivery_plate
+                )
+                if sale_date:
+                    # Convert to datetime if it's a date object
+                    if isinstance(sale_date, date) and not isinstance(sale_date, datetime):
+                        now = datetime.now()
+                        sale_date = datetime.combine(sale_date, now.time())
+                    sale.created_at = sale_date
+                    # Also update last_modified to match
+                    sale.last_modified = sale_date
+                session.add(sale)
+                session.flush()
+
+                for item in sale_items:
+                    amount = item['quantity'] * item['dozen'] * item['unit_price']
+                    sale_item = {
+                        'sale_id': sale.id,
+                        'batch_id': item['batch_id'],
+                        'unit_price': item['unit_price'],
+                        'quantity': item['quantity'],
+                        'dozen': item['dozen'],
+                        'total': amount,
+                        'for_despatch': item['for_despatch'],
+                        'created_at': sale_date,
+                        'last_modified': sale_date
+                    }
+                    self.sale_item_service.create_with_session(session, sale_item)
+
+
+                    batch_transaction = {
+                        'batch_id': item['batch_id'],
+                        'quantity': item['quantity'],
+                        'transaction_type': TransactionType.SALE,
+                        'reference_number': str(sale.id), 
+                        'notes': f"Sale #{sale.id}",
+                        'user_id': user_id,
+                        'created_at': sale_date,
+                        'last_modified': sale_date
+                    }
+                    self.new_batch_transaction_service.create_with_session(session, batch_transaction)
+
+
+                    batch = session.query(ProductBatch).get(item['batch_id'])
+                    if batch:
+                        qty_sold = item['quantity']
+                        batch.available_quantity -= qty_sold
+                        if batch.available_quantity < 0:
+                            raise ValueError(
+                                f"Batch {batch.id} went negative while saving sale #{sale.id}; requested {qty_sold}, available before sale was {batch.available_quantity + qty_sold}"
+                            )
+                        # Update product totals if needed
+                        if batch.product:
+                            batch.product.update_totals()
+                
+                due_date = None
+                if is_credit and credit_term_days is not None:
+                    base_date = sale_date.date() if isinstance(sale_date, datetime) else sale_date
+                    due_date = base_date + timedelta(days=credit_term_days) # type: ignore
+
+                sale_payment_term_data = {
+                    'sale_id': sale.id,
+                    'payment_status': PaymentStatusEnum.PAID if not is_credit else PaymentStatusEnum.CREDIT,
+                    'total_amount': payment_term_total,
+                    'paid_amount': 0.0,
+                    'due_date': due_date,
+                    'created_at': sale_date,
+                    'last_modified': sale_date
+                }
+                sale_payment_term = self.sale_payment_term_service.create_with_session(session, sale_payment_term_data)
+                session.flush()
+
+                if payment_type == "paid" and payments:
+                    for payment in payments:
+                        self.payment_transaction_service.record_payment(
+                            session,
+                            sale_payment_term.id,
+                            payment['amount'],
+                            payment['bank_account_id'],
+                            user_id,
+                            payment_date=sale_date.date()
+                        )
+                    session.refresh(sale_payment_term)
+                
+                session.commit()
+                return sale, None
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error creating sale: {e}")
+                return None, str(e)
+
+    def create_credit_sale(self, data):
+        with get_session() as session:
+            try:
+                total_amount = sum(
+                    item['quantity'] * item['dozen'] * item['unit_price']
+                    for item in data['items']
+                )
+                labour = data.get('labour_expense', 0.0)
+                payment_term_total = total_amount + labour
+                
+                credit_term_days = data.get('credit_term_days')
+                due_date = None
+                if credit_term_days is not None:
+                    sale_date = data.get('sale_date', date.today())
+                    due_date = sale_date + timedelta(days=credit_term_days)
+
+                sale = ProfessionalSale(
+                    customer_id=data['customer_id'],
+                    total_amount=total_amount,
+                    labour_expense=labour,
+                    is_credit_sale=True,
+                    items_data=data['items'],
+                    delivery_name=data.get('delivery_name'),
+                    delivery_place=data.get('delivery_place'),
+                    delivery_phone=data.get('delivery_phone'),
+                    delivery_Plate=data.get('delivery_plate'),
+                    user_id=data.get('user_id')
+                )
+                session.add(sale)
+                session.flush()
+
+                sale_payment_term_data = {
+                    'sale_id': sale.id,
+                    'payment_status': PaymentStatusEnum.CREDIT,
+                    'total_amount': payment_term_total,
+                    'paid_amount': 0.0,
+                    'due_date': due_date,
+                }
+                sale_payment_term = self.sale_payment_term_service.create_with_session(session, sale_payment_term_data)
+                session.commit()
+                return sale, None
+            except Exception as e:
+                session.rollback()
+                logger.exception("Failed to create credit sale")
+                return None, str(e)
+    
+    @property
+    def cash_account_id(self) -> Optional[int]:
+        if self._cash_account_id is None:
+            try:
+                account = self.account_service.get_by_account_number('00000')
+                self._cash_account_id = account.id if account else None
+                if self._cash_account_id is None:
+                    logger.warning("Cash account with number '00000' not found.")
+                    self._cash_account_id = -1  # Sentinel to avoid repeated attempts
+            except Exception as e:
+                logger.error(f"Failed to get cash account ID: {e}")
+                self._cash_account_id = -1
+        return self._cash_account_id if self._cash_account_id != -1 else None
+
+    def get_daily_sales_summary(self, target_date: date) -> Dict[str, Any]:
+        now_local = datetime.now()
+        now_utc = datetime.utcnow()
+        offset = now_local - now_utc
+
+        start_local = datetime.combine(target_date, time.min)
+        end_local = datetime.combine(target_date, time.max)
+
+        start_utc = start_local - offset
+        end_utc = end_local - offset
+
+        with get_session() as session:
+            sales = (
+                session.query(ProfessionalSale)
+                .options(
+                    joinedload(ProfessionalSale.customer),
+                    joinedload(ProfessionalSale.payment_terms)
+                    .joinedload(SalePaymentTerm.payment_transactions)
+                    .joinedload(PaymentTransaction.bank_account)
+                )
+                .filter(
+                    ProfessionalSale.created_at.between(start_utc, end_utc),
+                    ProfessionalSale.is_deleted == False
+                )
+                .all()
+            )
+
+            total_sales_amount = 0.0
+            total_labour_expense = 0.0
+            total_invoiced_full = 0.0 
+            payment_totals = {}
+            details = []
+
+            for sale in sales:
+                total_sales_amount += sale.total_amount
+                total_labour_expense += sale.labour_expense
+
+                # Full amount from the payment term (already correct for both paid and credit)
+                full_total = sale.total_amount   # fallback
+                if sale.payment_terms:
+                    full_total = sale.payment_terms[0].total_amount
+                total_invoiced_full += full_total
+
+                term_has_payment_today = False
+                for payment_term in sale.payment_terms:
+                    for payment in payment_term.payment_transactions:
+                        if payment.payment_date != target_date:
+                            continue
+                        term_has_payment_today = True
+                        account_id = payment.bank_account_id
+                        amount = payment.amount
+                        payment_totals[account_id] = payment_totals.get(account_id, 0.0) + amount
+
+                        if payment.bank_account:
+                            if account_id == self.cash_account_id:
+                                payment_type_display = "Cash"
+                            else:
+                                payment_type_display = f"{payment.bank_account.account_name} - {payment.bank_account.bank_name}"
+
+                        details.append({
+                            'sale_id': sale.id,
+                            'customer_name': sale.customer.name if sale.customer else "N/A",
+                            'total_amount': sale.total_amount,
+                            'labour_expense': sale.labour_expense,
+                            'full_total': full_total,
+                            'payment_type': payment_type_display,
+                            'payment_amount': amount,
+                            'delivery_name': sale.delivery_name or "",
+                            'delivery_place': sale.delivery_place or "",
+                            'delivery_phone': sale.delivery_phone or "",
+                            'delivery_plate': sale.delivery_Plate or "",
+                        })
+                    if not term_has_payment_today and payment_term.payment_status in [
+                        PaymentStatusEnum.CREDIT.value,
+                        PaymentStatusEnum.PARTIAL.value
+                    ]:
+                        details.append({
+                            'sale_id': sale.id,
+                            'customer_name': sale.customer.name if sale.customer else "N/A",
+                            'total_amount': sale.total_amount,
+                            'labour_expense': sale.labour_expense,
+                            'full_total': full_total, 
+                            'payment_type': payment_term.payment_status.capitalize(),
+                            'payment_amount': sale.total_amount,
+                            'delivery_name': sale.delivery_name or "",
+                            'delivery_place': sale.delivery_place or "",
+                            'delivery_phone': sale.delivery_phone or "",
+                            'delivery_plate': sale.delivery_Plate or "",
+                        })
+            
+            cash_account_id = self.cash_account_id
+            cash_total = payment_totals.get(cash_account_id, 0.0) if cash_account_id else 0.0
+            bank_total = sum(amt for acc, amt in payment_totals.items() if acc != cash_account_id)
+
+            return {
+                'date': target_date,
+                'total_sales_amount': total_sales_amount,
+                'total_labour_expense': total_labour_expense,
+                'total_invoiced_full': total_invoiced_full,
+                'cash_total': cash_total,
+                'bank_total': bank_total,
+                'payment_totals_by_account': payment_totals,
+                'details': details,
+            }
+    
+    def get_sales_with_labour_expense(self, target_date: date) -> List[Dict]:
+        now_local = datetime.now()
+        now_utc = datetime.utcnow()
+        offset = now_local - now_utc
+
+        start_local = datetime.combine(target_date, time.min)
+        end_local = datetime.combine(target_date, time.max)
+
+        start_utc = start_local - offset
+        end_utc = end_local - offset
+
+        with get_session() as session:
+            sales = (
+                session.query(ProfessionalSale)
+                .options(
+                    joinedload(ProfessionalSale.customer),
+                    joinedload(ProfessionalSale.payment_terms)
+                    .joinedload(SalePaymentTerm.payment_transactions)
+                    .joinedload(PaymentTransaction.bank_account)
+                )
+                .filter(
+                    ProfessionalSale.created_at.between(start_utc, end_utc),
+                    ProfessionalSale.labour_expense > 0,
+                    ProfessionalSale.is_deleted == False
+                )
+                .all()
+            )
+
+            result = []
+            for s in sales:
+                bank_names = []
+                for pt in s.payment_terms:
+                    for payment in pt.payment_transactions:
+                        if payment.is_deleted:
+                            continue
+                        if payment.bank_account:
+                            name = f"{payment.bank_account.account_name} - {payment.bank_account.bank_name}" if payment.bank_account.bank_name else payment.bank_account.account_name
+                            if name not in bank_names:
+                                bank_names.append(name)
+                paid = 0.0
+                for pt in s.payment_terms:
+                    for payment in pt.payment_transactions:
+                        if not payment.is_deleted:
+                            paid += payment.amount   # use the correct field name from PaymentTransaction
+
+                unpaid = s.total_amount - paid
+                result.append({
+                    'sale_id': s.id,
+                    'customer_name': s.customer.name if s.customer else "N/A",
+                    'total_amount': s.total_amount,
+                    'labour_expense': s.labour_expense,
+                    'is_credit_sale': s.is_credit_sale,
+                    'delivery_name': s.delivery_name or "",
+                    'bank_accounts': bank_names,               # new field
+                    'unpaid': unpaid,                          # new field
+                    # keep delivery_phone/place/plate if needed elsewhere, but they are no longer in the UI
+                })
+            return result
+    
+
+    def get_despatch_status_sales(self, is_despatched: bool) -> List[ProfessionalSale]:
+        with get_session() as session:
+            subq = session.query(
+                ProfessionalSaleItem.sale_id,
+                func.sum(case((ProfessionalSaleItem.for_despatch == False, 1), else_=0)).label('not_despatched_count')
+            ).group_by(ProfessionalSaleItem.sale_id, ProfessionalSaleItem.is_deleted == False).subquery()
+
+            query = session.query(ProfessionalSale).outerjoin(
+                subq, ProfessionalSale.id == subq.c.sale_id
+            ).options(
+                joinedload(ProfessionalSale.customer),
+                joinedload(ProfessionalSale.items).joinedload(ProfessionalSaleItem.batch).joinedload(ProductBatch.product)
+            ).filter(
+                ProfessionalSale.is_deleted == False  # <-- ADD THIS FILTER
+            )
+
+            if is_despatched:
+                query = query.filter(
+                    (subq.c.not_despatched_count == 0) | (subq.c.not_despatched_count == None)
+                )
+            else:
+                query = query.filter(subq.c.not_despatched_count > 0)
+            
+            return query.all()
+    
+    def count_despatch_status_sales(self, is_despatched: bool) -> int:
+        """Count sales by despatch status (used for card values)."""
+        from sqlalchemy import func, case
+
+        with get_session() as session:
+            subq = session.query(
+                ProfessionalSaleItem.sale_id,
+                func.sum(case((ProfessionalSaleItem.for_despatch == False, 1), else_=0)).label('not_despatched_count')
+            ).group_by(ProfessionalSaleItem.sale_id).subquery()
+
+            query = session.query(ProfessionalSale).outerjoin(
+                subq, ProfessionalSale.id == subq.c.sale_id
+            ).filter(
+            ProfessionalSale.is_deleted == False  # <-- ADD THIS FILTER
+        )
+
+            if is_despatched:
+                query = query.filter(
+                    (subq.c.not_despatched_count == 0) | (subq.c.not_despatched_count == None)
+                )
+            else:
+                query = query.filter(subq.c.not_despatched_count > 0)
+
+            return query.count()
+    
+    def get_credit_sales_summary(self) -> dict:
+        """Return total credit amount, total paid, total unpaid."""
+        with get_session() as session:
+            sales = session.query(ProfessionalSale).outerjoin(SalePaymentTerm).filter(
+                ProfessionalSale.is_deleted == False,
+                (
+                    (ProfessionalSale.is_credit_sale == True) |
+                    (SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]))
+                )
+            ).distinct().all()
+            total_credit = 0.0
+            total_paid = 0.0
+            for sale in sales:
+                total_credit += sale.total_amount
+                for pt in sale.payment_terms:
+                    total_paid += pt.paid_amount
+            return {
+                'total_credit_amount': total_credit,
+                'total_paid': total_paid,
+                'total_unpaid': total_credit - total_paid
+            }
+
+    def record_credit_payment(self, sale_id: int, amount: float, bank_account_id: int, user_id: int) -> bool:
+        """Record a payment against a credit sale (assumes one payment term per sale)."""
+        from services.payment_transaction_service import PaymentTransactionService
+        with get_session() as session:
+            try:
+                sale = session.query(ProfessionalSale).get(sale_id)
+                if not sale:
+                    return False
+                # Find the first payment term (simplified – adjust if multiple terms exist)
+                payment_term = sale.payment_terms[0] if sale.payment_terms else None
+                if not payment_term:
+                    return False
+                PaymentTransactionService().record_payment(
+                    session, payment_term.id, amount, bank_account_id, user_id
+                )
+                session.commit()
+                return True
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error recording credit payment: {e}")
+                return False
+    
+    def get_sale_with_items(self, sale_id: int) -> Optional[ProfessionalSale]:
+        """
+        Retrieve a sale by ID with all its items, batches, and products eagerly loaded.
+        Returns None if not found or an error occurs.
+        """
+        with get_session() as session:
+            try:
+                sale = session.query(ProfessionalSale).options(
+                     joinedload(ProfessionalSale.items)
+                    .joinedload(ProfessionalSaleItem.batch)
+                    .joinedload(ProductBatch.product),
+                    joinedload(ProfessionalSale.payment_terms)
+                    .joinedload(SalePaymentTerm.payment_transactions)
+                    .joinedload(PaymentTransaction.bank_account)
+                ).filter(
+                    ProfessionalSale.id == sale_id,
+                    ProfessionalSale.is_deleted == False
+                ).first()
+                return sale
+            except Exception as e:
+                logger.error(f"Error loading sale with items {sale_id}: {e}")
+                return None
+    
+    def delete_sale_cascade(self, sale_id: int, user_id: int = None) -> bool:
+        with get_session() as session:
+            try:
+                sale = session.query(ProfessionalSale).options(
+                    joinedload(ProfessionalSale.items),
+                    joinedload(ProfessionalSale.payment_terms)
+                    .joinedload(SalePaymentTerm.payment_transactions)
+                ).filter(
+                    ProfessionalSale.id == sale_id,
+                    ProfessionalSale.is_deleted == False
+                ).first()
+                if not sale:
+                    logger.warning(f"Sale {sale_id} not found or already deleted")
+                    return False
+                
+                sale_data = self._capture_sale_data_for_notification(sale)
+                
+                for item in sale.items:
+                    # Restore batch available quantity
+                    batch = session.query(ProductBatch).get(item.batch_id)
+                    if batch:
+                        batch.available_quantity += item.quantity
+
+                    # Soft delete sale item
+                    item.is_deleted = True
+
+                    batch_transactions = session.query(BatchTransaction).filter(
+                        BatchTransaction.batch_id == item.batch_id,
+                        BatchTransaction.transaction_type == TransactionType.SALE,
+                        BatchTransaction.reference_number == str(sale_id),
+                        BatchTransaction.is_deleted == False
+                    ).all()
+                    for bt in batch_transactions:
+                        bt.is_deleted = True
+                
+                for term in sale.payment_terms:
+                    for payment in term.payment_transactions:
+                        payment.is_deleted = True
+
+                        # Soft delete associated bank transactions
+                        bank_txs = session.query(BankTransaction).filter(
+                            BankTransaction.sale_payment_term_id == term.id,
+                            BankTransaction.is_deleted == False
+                        ).all()
+                        account_ids = set()
+                        for bt in bank_txs:
+                            bt.is_deleted = True
+                            account_ids.add(bt.bank_account_id)
+
+                        # Recalculate balance chain for each affected account
+                        for acc_id in account_ids:
+                            self.bank_transaction_service.recalculate_balances_for_account(session, acc_id)
+                    
+                    term.is_deleted = True
+                
+                sale.is_deleted = True
+
+                product_ids = set()
+                for item in sale.items:
+                    if item.batch and item.batch.product_id:
+                        product_ids.add(item.batch.product_id)
+                for pid in product_ids:
+                    product = session.query(ProfessionalProduct).get(pid)
+                    if product:
+                        product.update_totals()
+                
+                session.commit()
+                logger.info(f"Successfully deleted sale {sale_id} with cascade")
+                
+                self._refresh_json_cache_from_db()
+                self._send_cancellation_notification(sale_data)
+                
+                return True
+
+            except Exception as e:
+                session.rollback()
+                logger.exception(f"Error deleting sale cascade {sale_id}")
+                return False
+
+    
+    def _capture_sale_data_for_notification(self, sale: ProfessionalSale) -> dict:
+        """Capture sale details before deletion for notification purposes."""
+        from ui.components.ethiopian_date import EthiopianDateConverter
+        
+        items = []
+        for item in sale.items:
+            product_name = item.batch.product.name if item.batch and item.batch.product else "Unknown"
+            items.append({
+                'product_name': product_name,
+                'dozen': item.dozen,
+                'quantity': item.quantity,
+                'unit_price': item.unit_price,
+                'total': item.total,
+            })
+        
+        return {
+            'sale_id': sale.id,
+            'delivery_name': sale.delivery_name or "",
+            'items': items,
+        }
+
+    def _send_cancellation_notification(self, sale_data: dict):
+        """Send Telegram notification about a canceled/returned sale (bilingual)."""
+        try:
+            from telegrambot.bot import notify_store_team_sync
+            
+            # Build items text
+            items_text_en = ""
+            items_text_am = ""
+            for item in sale_data['items']:
+                pn = item['product_name']
+                qty = item['quantity']
+                items_text_en += f"  • {pn}: quantity: {qty} pcs\n"
+                items_text_am += f"  • {pn}: ብዛት፡ {qty}\n"
+            
+            delivery_name = sale_data['delivery_name']
+            
+            # Build bilingual message
+            # message = (
+                # f"❌ <b>Sale Canceled / Returned</b> ❌\n\n"
+                # f"<b>Sale ID:</b> #{sale_data['sale_id']}\n"
+            # )
+            # if delivery_name:
+                # message += f"<b>Delivery:</b> {delivery_name}\n"
+            # if items_text_en:
+                # message += f"\n<b>Items:</b>\n{items_text_en}"
+            
+            message = (
+                f"\n══════════════════════\n\n"
+                f"❌ <b>ሽያጭ ተሰርዟል / ተመልሷል</b> ❌\n\n"
+                f"<b>የሽያጭ ቁጥር:</b> #{sale_data['sale_id']}\n"
+            )
+            if delivery_name:
+                message += f"<b>አድራሻ:</b> {delivery_name}\n"
+            if items_text_am:
+                message += f"\n<b>እቃዎች:</b>\n{items_text_am}"
+            
+            notify_store_team_sync(message)
+            logger.info(f"Cancellation notification sent for sale #{sale_data['sale_id']}")
+            
+        except Exception as e:
+            logger.error(f"Failed to send cancellation notification for sale #{sale_data.get('sale_id')}: {e}", exc_info=True)
+
+    def get_credit_sales_list(self) -> list:
+        """Return list of credit sales with details for table, newest first."""
+        with get_session() as session:
+            from models.sale_payment_term import SalePaymentTerm, PaymentStatusEnum
+            from sqlalchemy.orm import joinedload
+            from sqlalchemy import or_
+
+            sales = session.query(ProfessionalSale).options(
+                joinedload(ProfessionalSale.customer),
+                joinedload(ProfessionalSale.payment_terms)
+            ).filter(
+                ProfessionalSale.is_deleted == False,
+                or_(
+                    ProfessionalSale.is_credit_sale == True,
+                    ProfessionalSale.payment_terms.any(
+                        SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL])
+                    )
+                )
+            ).order_by(ProfessionalSale.created_at.desc()).all()
+
+            result = []
+            for sale in sales:
+                # Find the first relevant payment term (CREDIT or PARTIAL)
+                term = None
+                for pt in sale.payment_terms:
+                    if pt.payment_status in [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]:
+                        term = pt
+                        break
+                if not term and sale.payment_terms:
+                    term = sale.payment_terms[0]  # fallback (should not happen)
+                if not term:
+                    continue
+
+                total = term.total_amount
+                paid = term.paid_amount
+                remaining = total - paid
+                status_display = term.payment_status.value.capitalize()
+
+                result.append({
+                    'sale_id': sale.id,
+                    'customer_name': sale.customer.name if sale.customer else "N/A",
+                    'total_amount': total,
+                    'paid_amount': paid,
+                    'remaining': remaining,
+                    'status': status_display,
+                    'payment_terms': sale.payment_terms,
+                    'payment_term_id': term.id,
+                    'created_at': sale.created_at
+                })
+            return result
+    
+    def record_payment_by_term(self, payment_term_id: int, amount: float, bank_account_id: int, user_id: int) -> bool:
+        """Record a payment against a specific payment term."""
+        with get_session() as session:
+            try:
+                from models.sale_payment_term import SalePaymentTerm
+                from services.payment_transaction_service import PaymentTransactionService
+
+                term = session.query(SalePaymentTerm).get(payment_term_id)
+                if not term:
+                    return False
+
+                PaymentTransactionService().record_payment(
+                    session, term.id, amount, bank_account_id, user_id
+                )
+                session.commit()
+                return True
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error recording payment by term: {e}")
+                return False
+    
+    def find_duplicate_sale(
+        self,
+        customer_id: int,
+        items: List[Dict],
+        labour_expense: float,
+        delivery_name: Optional[str],
+        hours: int = 24
+    ):
+        with get_session() as session:
+            cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+            input_items = {
+                (item['batch_id'], item['quantity'], item['dozen'], item['unit_price'])
+                for item in items
+            }
+
+            candidate_sales = (
+                session.query(ProfessionalSale)
+                .filter(
+                    ProfessionalSale.customer_id == customer_id,
+                    ProfessionalSale.created_at >= cutoff,
+                    ProfessionalSale.is_deleted == False
+                )
+                .options(joinedload(ProfessionalSale.items))
+                .all()
+            )
+            
+            for sale in candidate_sales:
+                if sale.labour_expense != labour_expense:
+                    continue
+                if sale.delivery_name != delivery_name:
+                    continue
+                
+                sale_items = set()
+                for si in sale.items:
+                    sale_items.add((si.batch_id, si.quantity, si.dozen, si.unit_price))
+                
+                if sale_items == input_items:
+                    return sale
+        
+        return None
+    
+    def get_credit_sales_by_customer(self) -> list:
+        """
+        Rerurn list of customers with therir aggregate credit sales data (total credit, total paid, total unpaid).
+        """
+        with get_session() as session:
+            sales = session.query(ProfessionalSale).options(
+                joinedload(ProfessionalSale.customer),
+                joinedload(ProfessionalSale.payment_terms)
+            ).filter(
+                ProfessionalSale.is_deleted == False,
+                or_(
+                    ProfessionalSale.is_credit_sale == True,
+                    ProfessionalSale.payment_terms.any(
+                        SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL])
+                    )
+                )
+            ).all()
+
+            customer_data = {}
+            for sale in sales:
+                term = None
+                for pt in sale.payment_terms:
+                    if pt.payment_status in [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]:
+                        term = pt
+                        break
+                if not term and sale.payment_terms:
+                    term = sale.payment_terms[0]
+                if not term:
+                    continue
+
+                cust_id = sale.customer_id
+                name = sale.customer.name if sale.customer else "N/A"
+                phone = sale.customer.phone if sale.customer else ""
+                if cust_id not in customer_data:
+                    customer_data[cust_id] = {
+                        'customer_id': cust_id,
+                        'customer_name': name,
+                        'customer_phone': phone,
+                        'total_amount': 0.0,
+                        'paid_amount': 0.0,
+                        'remaining': 0.0,
+                        'sale_ids': [],
+                        'payment_term_ids': [],
+                        'earliest_due_date': None,      # NEW
+                        'has_short_term': False         # NEW
+                    }
+                
+                customer_data[cust_id]['total_amount'] += term.total_amount
+                customer_data[cust_id]['paid_amount'] += term.paid_amount
+                remaining_for_term = term.total_amount - term.paid_amount
+                customer_data[cust_id]['remaining'] += remaining_for_term
+                customer_data[cust_id]['sale_ids'].append(sale.id)
+                customer_data[cust_id]['payment_term_ids'].append(term.id)
+
+                if remaining_for_term > 0 and term.due_date:
+                    if customer_data[cust_id]['earliest_due_date'] is None or term.due_date < customer_data[cust_id]['earliest_due_date']:
+                        customer_data[cust_id]['earliest_due_date'] = term.due_date
+
+                    sale_date = sale.created_at.date() if sale.created_at else None
+                    today = date.today()
+                    if sale_date and term.due_date == sale_date and term.due_date == today:
+                        customer_data[cust_id]['has_short_term'] = True
+            
+            result = list(customer_data.values())
+            for r in result:
+                if r['remaining'] == 0:
+                    r['status'] = 'Paid'
+                elif r['paid_amount'] > 0:
+                    r['status'] = 'Partial'
+                else:
+                    r['status'] = 'Unpaid'
+            
+            result.sort(key=lambda x: x['customer_name'])
+            return result
+    
+    def record_customer_payment(
+        self,
+        customer_id: int,
+        payments: List[Tuple[float, int]],
+        user_id: int,
+        note: Optional[str] = None,
+        payment_date: Optional[date] = None
+    ) -> bool:
+        if payment_date is None:
+            payment_date = date.today()
+        elif isinstance(payment_date, str):
+            from datetime import datetime as dt
+            payment_date = dt.strptime(payment_date, "%Y-%m-%d").date()
+
+        with get_session() as session:
+            try:
+                sales = session.query(ProfessionalSale).options(
+                    joinedload(ProfessionalSale.payment_terms)
+                ).filter(
+                    ProfessionalSale.customer_id == customer_id,
+                    ProfessionalSale.is_deleted == False,
+                    or_(
+                        ProfessionalSale.is_credit_sale == True,
+                        ProfessionalSale.payment_terms.any(
+                            SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL])
+                        )
+                    )
+                ).all()
+
+                if not sales:
+                    logger.info(f"No outstanding credit sales for customer {customer_id}")
+                    return False
+
+                def sale_sort_key(sale):
+                    has_short_term = False
+                    for term in sale.payment_terms:
+                        if term.payment_status in [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]:
+                            if term.due_date and term.due_date == sale.created_at.date():
+                                if term.total_amount - term.paid_amount > 0:
+                                    has_short_term = True
+                                    break
+                    return (0 if has_short_term else 1, sale.created_at)
+
+                sales.sort(key=sale_sort_key)
+
+                payment_made = False
+                for amount, bank_account_id in payments:
+                    if amount <= 0:
+                        continue
+                    remaining_split = amount
+                    for sale in sales:
+                        if remaining_split <= 0:
+                            break
+                        term = None
+                        for pt in sale.payment_terms:
+                            if pt.payment_status in [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]:
+                                term = pt
+                                break
+                        if not term and sale.payment_terms:
+                            term = sale.payment_terms[0]
+                        if not term:
+                            continue
+                        balance = term.total_amount - term.paid_amount
+                        if balance <= 0:
+                            continue
+                        payment_for_this = min(remaining_split, balance)
+                        # Pass the payment_date to the lower layer
+                        PaymentTransactionService().record_payment(
+                            session,
+                            term.id,
+                            payment_for_this,
+                            bank_account_id,
+                            user_id,
+                            note,
+                            payment_date
+                        )
+                        payment_made = True
+                        remaining_split -= payment_for_this
+                        session.refresh(term)
+                session.commit()
+                return payment_made
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error recording customer payment: {e}")
+                return False
+    
+    def get_credit_sales_by_ids(self, sale_ids: List[int]) -> list:
+        """
+        Returns detailed credit sales for the given list of sale IDs.
+        Used by the per‑customer list dialog.
+        """
+        with get_session() as session:
+            sales = session.query(ProfessionalSale).options(
+                joinedload(ProfessionalSale.customer),
+                joinedload(ProfessionalSale.payment_terms)
+            ).filter(
+                ProfessionalSale.id.in_(sale_ids),
+                ProfessionalSale.is_deleted == False,
+                or_(
+                    ProfessionalSale.is_credit_sale == True,
+                    ProfessionalSale.payment_terms.any(
+                        SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL])
+                    )
+                )
+            ).order_by(ProfessionalSale.created_at.desc()).all()
+
+            result = []
+            for sale in sales:
+                term = next(
+                    (pt for pt in sale.payment_terms if pt.payment_status in [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]),
+                    None
+                )
+                if not term and sale.payment_terms:
+                    term = sale.payment_terms[0]
+                if not term:
+                    continue
+
+                result.append({
+                    'sale_id': sale.id,
+                    'labour_expense': sale.labour_expense,
+                    'sale_date': sale.created_at,
+                    'total_amount': term.total_amount,
+                    'paid_amount': term.paid_amount,
+                    'remaining': term.total_amount - term.paid_amount,
+                    'status': term.payment_status.value.capitalize(),
+                    'payment_term_id': term.id,
+                })
+            return result
+    
+    def get_customer_payment_history(self, customer_id: int) -> List[Dict]:
+        with get_session() as session:
+            from models.payment_transaction import PaymentTransaction
+            from models.sale_payment_term import SalePaymentTerm, PaymentStatusEnum
+            from sqlalchemy.orm import joinedload
+            from sqlalchemy import or_
+
+            payments = session.query(PaymentTransaction).join(
+                SalePaymentTerm, PaymentTransaction.sale_payment_term_id == SalePaymentTerm.id
+            ).join(
+                ProfessionalSale, SalePaymentTerm.sale_id == ProfessionalSale.id
+            ).options(
+                joinedload(PaymentTransaction.bank_account)
+            ).filter(
+                ProfessionalSale.customer_id == customer_id,
+                ProfessionalSale.is_deleted == False,
+                PaymentTransaction.is_deleted == False,
+                # Only payments linked to credit sales
+                or_(
+                    ProfessionalSale.is_credit_sale == True,
+                    SalePaymentTerm.payment_status.in_(
+                        [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]
+                    )
+                )
+            ).order_by(PaymentTransaction.payment_date.desc(), PaymentTransaction.id.desc()).all()
+
+            result = []
+            for pt in payments:
+                result.append({
+                    'transaction_id': pt.id,
+                    'payment_term_id': pt.sale_payment_term_id,
+                    'sale_id': pt.payment_term.sale_id,
+                    'payment_date': pt.payment_date,
+                    'amount': pt.amount,
+                    'bank_account_id': pt.bank_account_id,
+                    'bank_account_name': pt.bank_account.account_name if pt.bank_account else 'N/A',
+                    'bank_name': pt.bank_account.bank_name if pt.bank_account else '',
+                    'payment_method': pt.payment_method.value if pt.payment_method else 'transfer',
+                    'notes': pt.notes or '',
+                })
+            return result
+
+
+    def delete_payment_transaction(self, transaction_id: int, user_id: int = None) -> bool:
+        """Delete a payment transaction, update the associated payment term and bank transaction."""
+        with get_session() as session:
+            try:
+                payment = session.query(PaymentTransaction).filter(
+                    PaymentTransaction.id == transaction_id,
+                    PaymentTransaction.is_deleted == False
+                ).first()
+                if not payment:
+                    logger.warning(f"Payment transaction {transaction_id} not found")
+                    return False
+
+                term = payment.payment_term
+                if not term:
+                    logger.warning(f"Payment term for transaction {transaction_id} not found")
+                    return False
+
+                amount = payment.amount
+                bank_account_id = payment.bank_account_id
+
+                # Soft delete payment transaction
+                payment.is_deleted = True
+                if user_id:
+                    payment.last_modified_by = user_id
+
+                # Soft delete associated bank transaction and recalculate
+                bank_tx = session.query(BankTransaction).filter(
+                    BankTransaction.sale_payment_term_id == term.id,
+                    BankTransaction.amount == amount,
+                    BankTransaction.bank_account_id == bank_account_id,
+                    BankTransaction.is_deleted == False
+                ).first()
+                if bank_tx:
+                    bank_tx.is_deleted = True
+                    if user_id:
+                        bank_tx.last_modified_by = user_id
+                    # Recalculate balance for this account
+                    self.bank_transaction_service.recalculate_balances_for_account(session, bank_account_id)
+
+                # Update payment term
+                term.paid_amount -= amount
+                term.update_status()
+
+                session.commit()
+                logger.info(f"Deleted payment transaction {transaction_id}, updated term {term.id}")
+                return True
+
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error deleting payment transaction {transaction_id}: {e}", exc_info=True)
+                return False
+    
+
+    def get_all_sales_count(self) -> int:
+        """Return total number of non-deleted sales (for card value)."""
+        with get_session() as session:
+            return session.query(ProfessionalSale) \
+                .filter(ProfessionalSale.is_deleted == False) \
+                .count()
+
+    def get_all_sales_paginated(
+        self,
+        page: int = 1,
+        page_size: int = 50,
+        search: str = "",
+        filter_date: Optional[date] = None
+    ) -> Tuple[List[ProfessionalSale], int]:
+        """Return a page of sales and total count. Safe against invalid filter_date."""
+        try:
+            with get_session() as session:
+                filter_query = session.query(ProfessionalSale) \
+                    .filter(ProfessionalSale.is_deleted == False)
+
+                if filter_date and isinstance(filter_date, date):
+                    start_dt = datetime.combine(filter_date, time.min)
+                    end_dt = datetime.combine(filter_date, time.max)
+                    filter_query = filter_query.filter(
+                        ProfessionalSale.created_at.between(start_dt, end_dt)
+                    )
+                elif filter_date:
+                    logger.warning(f"Invalid filter_date type: {type(filter_date)}")
+
+                if search:
+                    stmt = search.strip()
+                    conditions = []
+                    if stmt.isdigit():
+                        conditions.append(ProfessionalSale.id == int(stmt))
+                    conditions.append(
+                        ProfessionalSale.customer.has(Customer.name.ilike(f"%{stmt}%"))
+                    )
+                    conditions.append(
+                        ProfessionalSale.items.any(
+                            ProfessionalSaleItem.batch.has(
+                                ProductBatch.product.has(ProfessionalProduct.name.ilike(f"%{stmt}%"))
+                            )
+                        )
+                    )
+                    conditions.append(
+                        ProfessionalSale.delivery_name.ilike(f"%{stmt}%")
+                    )
+                    filter_query = filter_query.filter(or_(*conditions))
+
+                ordered_ids_query = filter_query.with_entities(
+                    ProfessionalSale.id
+                ).distinct().order_by(ProfessionalSale.id.desc())
+
+                total = ordered_ids_query.count()
+
+                paginated_ids = ordered_ids_query.offset((page - 1) * page_size) \
+                    .limit(page_size) \
+                    .all()
+
+                sale_ids = [row[0] for row in paginated_ids]
+
+                if not sale_ids:
+                    return [], 0
+
+                sales = session.query(ProfessionalSale) \
+                    .options(
+                        joinedload(ProfessionalSale.customer),
+                        joinedload(ProfessionalSale.payment_terms)
+                    ) \
+                    .filter(ProfessionalSale.id.in_(sale_ids)) \
+                    .all()
+
+                id_to_sale = {sale.id: sale for sale in sales}
+                ordered_sales = [id_to_sale[sid] for sid in sale_ids if sid in id_to_sale]
+
+                return ordered_sales, total
+        except Exception as e:
+            logger.error(f"Error in get_all_sales_paginated: {e}", exc_info=True)
+            return [], 0
+
+    def get_payments_by_sale(self, sale_id: int) -> List[Dict]:
+        """Return all payment transactions for a given sale."""
+        with get_session() as session:
+            payments = session.query(PaymentTransaction) \
+                .join(SalePaymentTerm, PaymentTransaction.sale_payment_term_id == SalePaymentTerm.id) \
+                .filter(SalePaymentTerm.sale_id == sale_id,
+                        PaymentTransaction.is_deleted == False) \
+                .options(joinedload(PaymentTransaction.bank_account)) \
+                .order_by(PaymentTransaction.payment_date.desc()) \
+                .all()
+            result = []
+            for pt in payments:
+                result.append({
+                    'transaction_id': pt.id,
+                    'payment_term_id': pt.sale_payment_term_id,
+                    'payment_date': pt.payment_date,
+                    'amount': pt.amount,
+                    'bank_account_id': pt.bank_account_id,
+                    'bank_account_name': pt.bank_account.account_name if pt.bank_account else 'N/A',
+                    'bank_name': pt.bank_account.bank_name if pt.bank_account else '',
+                })
+            return result
+    
+    def get_delivery_names_with_frequency(self, search_text: str = "", limit: int = 50) -> List[str]:
+        """
+        Get unique delivery names ordered by frequency of use.
+        Most frequently used names appear first.
+        """
+        with get_session() as session:
+            query = session.query(
+                ProfessionalSale.delivery_name,
+                func.count(ProfessionalSale.id).label('frequency')
+            ).filter(
+                ProfessionalSale.delivery_name.isnot(None),
+                ProfessionalSale.delivery_name != '',
+                ProfessionalSale.is_deleted == False
+            )
+            
+            if search_text:
+                query = query.filter(ProfessionalSale.delivery_name.ilike(f"%{search_text}%"))
+            
+            results = query.group_by(ProfessionalSale.delivery_name) \
+                .order_by(func.count(ProfessionalSale.id).desc()) \
+                .limit(limit) \
+                .all()
+            
+            return [r[0] for r in results if r[0]]
+    
+    def get_total_selling_price_for_period(self, start_date: date, end_date: date) -> float:
+        """Sum of (quantity * dozen * unit_price) from sale items."""
+        # from models.new_sale_item import ProfessionalSaleItem
+        # from models.new_sales import ProfessionalSale
+        # from sqlalchemy import func
+        # from datetime import datetime, time
+        start_dt = datetime.combine(start_date, time.min)
+        end_dt = datetime.combine(end_date, time.max)
+        with get_session() as session:
+            total = session.query(
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProfessionalSaleItem.unit_price)
+            ).join(
+                ProfessionalSale, ProfessionalSaleItem.sale_id == ProfessionalSale.id
+            ).filter(
+                ProfessionalSale.created_at.between(start_dt, end_dt),
+                ProfessionalSale.is_deleted == False,
+                ProfessionalSaleItem.is_deleted == False
+            ).scalar()
+            return float(total) if total else 0.0
+
+    def get_total_cost_price_for_period(self, start_date: date, end_date: date) -> float:
+        """Sum of (quantity * dozen * batch.cost_price) from sale items."""
+        # from models.new_sale_item import ProfessionalSaleItem
+        # from models.product_batch import ProductBatch
+        # from models.new_sales import ProfessionalSale
+        # from sqlalchemy import func
+        # from datetime import datetime, time
+        start_dt = datetime.combine(start_date, time.min)
+        end_dt = datetime.combine(end_date, time.max)
+        with get_session() as session:
+            total = session.query(
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProductBatch.cost_price)
+            ).select_from(ProfessionalSaleItem).join(
+                ProductBatch, ProfessionalSaleItem.batch_id == ProductBatch.id
+            ).join(
+                ProfessionalSale, ProfessionalSaleItem.sale_id == ProfessionalSale.id
+            ).filter(
+                ProfessionalSale.created_at.between(start_dt, end_dt),
+                ProfessionalSale.is_deleted == False,
+                ProfessionalSaleItem.is_deleted == False,
+                ProductBatch.is_deleted == False
+            ).scalar()
+            return float(total) if total else 0.0
+    
+    def get_product_profit_breakdown(self, start_date: date, end_date: date) -> List[Dict]:
+
+        start_dt = datetime.combine(start_date, time.min)
+        end_dt = datetime.combine(end_date, time.max)
+        with get_session() as session:
+            results = session.query(
+                ProfessionalProduct.id.label('product_id'),
+                ProfessionalProduct.name.label('product_name'),
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen).label('total_qty'),
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProductBatch.cost_price).label('total_cost'),
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProfessionalSaleItem.unit_price).label('total_selling')
+            ).join(
+                ProductBatch, ProfessionalSaleItem.batch_id == ProductBatch.id
+            ).join(
+                ProfessionalProduct, ProductBatch.product_id == ProfessionalProduct.id
+            ).join(
+                ProfessionalSale, ProfessionalSaleItem.sale_id == ProfessionalSale.id
+            ).filter(
+                ProfessionalSale.created_at.between(start_dt, end_dt),
+                ProfessionalSale.is_deleted == False,
+                ProfessionalSaleItem.is_deleted == False,
+                ProductBatch.is_deleted == False,
+                ProfessionalProduct.is_deleted == False
+            ).group_by(
+                ProfessionalProduct.id, ProfessionalProduct.name
+            ).all()
+
+            data = []
+            total_profit = 0.0
+            for row in results:
+                profit = row.total_selling - row.total_cost
+                total_profit += profit
+                data.append({
+                    'product_name': row.product_name,
+                    'quantity': int(row.total_qty),
+                    'total_cost': float(row.total_cost),
+                    'total_selling': float(row.total_selling),
+                    'profit': profit,
+                })
+
+            # Second pass to compute ROI, margin, and contribution %
+            for item in data:
+                profit = item['profit']
+                total_cost = item['total_cost']
+                total_selling = item['total_selling']
+                item['roi'] = (profit / total_cost * 100) if total_cost > 0 else 0.0
+                item['margin'] = (profit / total_selling * 100) if total_selling > 0 else 0.0
+                item['contribution'] = (profit / total_profit * 100) if total_profit > 0 else 0.0
+
+            data.sort(key=lambda x: x['profit'], reverse=True)
+            return data
+    
+    def get_total_quantity_for_period(self, start_date: date, end_date: date) -> int:
+        """Return total quantity (units) sold in the date range."""
+        # from models.new_sale_item import ProfessionalSaleItem
+        # from models.new_sales import ProfessionalSale
+        # from sqlalchemy import func
+        # from datetime import datetime, time
+
+        start_dt = datetime.combine(start_date, time.min)
+        end_dt = datetime.combine(end_date, time.max)
+
+        with get_session() as session:
+            total = session.query(
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen)
+            ).join(
+                ProfessionalSale, ProfessionalSaleItem.sale_id == ProfessionalSale.id
+            ).filter(
+                ProfessionalSale.created_at.between(start_dt, end_dt),
+                ProfessionalSale.is_deleted == False,
+                ProfessionalSaleItem.is_deleted == False
+            ).scalar()
+            return int(total) if total else 0
+    
+    def get_customer_combined_history(self, customer_id: int) -> List[Dict]:
+        """
+        Returns a combined list of credit sales and payments for a customer,
+        sorted by date, with running balance computed.
+        Each entry contains: date, amount (positive for sales, negative for payments),
+        type, notes, and display info for the 'Bank Account' column.
+        """
+        with get_session() as session:
+            # 1. Credit sales (increase balance)
+            sales = session.query(ProfessionalSale).options(
+                joinedload(ProfessionalSale.payment_terms)
+            ).filter(
+                ProfessionalSale.customer_id == customer_id,
+                ProfessionalSale.is_deleted == False,
+                or_(
+                    ProfessionalSale.is_credit_sale == True,
+                    ProfessionalSale.payment_terms.any(
+                        SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL])
+                    )
+                )
+            ).all()
+
+            combined = []
+
+            for sale in sales:
+                # Find the relevant payment term (CREDIT or PARTIAL)
+                term = None
+                for pt in sale.payment_terms:
+                    if pt.payment_status in [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]:
+                        term = pt
+                        break
+                if not term and sale.payment_terms:
+                    term = sale.payment_terms[0]  # fallback
+                if not term:
+                    continue
+
+                date_obj = sale.created_at.date() if sale.created_at else date.today()
+                combined.append({
+                    'date': date_obj,
+                    'amount': term.total_amount,          # positive = increases balance
+                    'type': 'credit_sale',
+                    'notes': f"Credit sale #{sale.id}",
+                    'sale_id': sale.id,
+                    'transaction_id': None,
+                    'bank_account_display': 'New Credit',
+                    'bank_account_id': None,
+                })
+
+            # 2. Payments (decrease balance) – grouped by (payment_date, bank_account_id)
+            raw_payments = self.get_customer_payment_history(customer_id)
+            payment_groups = {}
+            for p in raw_payments:
+                key = (p['payment_date'], p['bank_account_id'])
+                if key not in payment_groups:
+                    payment_groups[key] = {
+                        'date': p['payment_date'],
+                        'amount': 0.0,
+                        'notes': [],
+                        'transaction_ids': [],
+                        'bank_account_display': f"{p['bank_name']} - {p['bank_account_name']}" if p['bank_name'] else p['bank_account_name'],
+                        'bank_account_id': p['bank_account_id'],
+                    }
+                payment_groups[key]['amount'] += p['amount']
+                if p.get('notes'):
+                    payment_groups[key]['notes'].append(p['notes'])
+                payment_groups[key]['transaction_ids'].append(p['transaction_id'])
+
+            for group in payment_groups.values():
+                combined.append({
+                    'date': group['date'],
+                    'amount': -group['amount'],            # negative = decreases balance
+                    'type': 'payment',
+                    'notes': '; '.join(filter(None, group['notes'])) if group['notes'] else '',
+                    'sale_id': None,
+                    'transaction_id': group['transaction_ids'][0],  # just for reference
+                    'bank_account_display': group['bank_account_display'],
+                    'bank_account_id': group['bank_account_id'],
+                    'all_transaction_ids': group['transaction_ids'],  # store all for deletion
+                })
+
+            # 3. Sort by date (ascending) to compute running balance
+            combined.sort(key=lambda x: x['date'])
+
+            # 4. Compute running balance and add 'balance_before'
+            balance = 0.0
+            for tx in combined:
+                tx['balance_before'] = balance
+                balance += tx['amount']
+                tx['balance_after'] = balance
+
+            return combined
+    
+    def count_unpaid_same_day_credits(self) -> int:
+        today = date.today()
+        with get_session() as session:
+            count = session.query(
+                func.count(func.distinct(ProfessionalSale.customer_id))
+            ).join(
+                SalePaymentTerm, ProfessionalSale.id == SalePaymentTerm.sale_id
+            ).filter(
+                ProfessionalSale.is_deleted == False,
+                SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]),
+                SalePaymentTerm.due_date == func.date(ProfessionalSale.created_at),
+                SalePaymentTerm.due_date == today,          # Changed from <= to ==
+                SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount > 0
+            ).scalar()
+
+            return count or 0
+    
+    def get_customer_credit_sales_grouped(self, customer_id: int) -> List[Dict]:
+        with get_session() as session:
+            # Load all credit sales for this customer with items, batches, products
+            sales = session.query(ProfessionalSale).options(
+                joinedload(ProfessionalSale.payment_terms),
+                joinedload(ProfessionalSale.items)
+                .joinedload(ProfessionalSaleItem.batch)
+                .joinedload(ProductBatch.product)
+            ).filter(
+                ProfessionalSale.customer_id == customer_id,
+                ProfessionalSale.is_deleted == False,
+                ProfessionalSale.is_credit_sale == True
+            ).order_by(ProfessionalSale.created_at.desc()).all()
+
+            # Group by date (YYYY-MM-DD)
+            groups = {}
+            for sale in sales:
+                # Find relevant payment term
+                term = None
+                for pt in sale.payment_terms:
+                    if pt.payment_status in [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]:
+                        term = pt
+                        break
+                if not term and sale.payment_terms:
+                    term = sale.payment_terms[0]
+                if not term:
+                    continue
+
+                date_key = sale.created_at.date() if sale.created_at else None
+                if date_key not in groups:
+                    groups[date_key] = {
+                        'sale_date': date_key,
+                        'total_amount': 0.0,
+                        'paid_amount': 0.0,
+                        'remaining': 0.0,
+                        'sale_ids': [],
+                        'items': [],
+                    }
+                groups[date_key]['total_amount'] += term.total_amount
+                groups[date_key]['paid_amount'] += term.paid_amount
+                groups[date_key]['remaining'] += (term.total_amount - term.paid_amount)
+                groups[date_key]['sale_ids'].append(sale.id)
+
+                # Collect items from this sale
+                for item in sale.items:
+                    if item.is_deleted:
+                        continue
+                    product_name = item.batch.product.name if item.batch and item.batch.product else "Unknown"
+                    groups[date_key]['items'].append({
+                        'product_name': product_name,
+                        'quantity': item.quantity,
+                        'dozen': item.dozen,
+                        'unit_price': item.unit_price,
+                        'total': item.total,
+                        'for_despatch': item.for_despatch,
+                    })
+
+            # Convert to list, compute status, sort newest first
+            result = []
+            for date_key, group in groups.items():
+                if group['remaining'] <= 0:
+                    status = 'Paid'
+                elif group['paid_amount'] > 0:
+                    status = 'Partial'
+                else:
+                    status = 'Unpaid'
+                result.append({
+                    'sale_date': date_key,
+                    'total_amount': group['total_amount'],
+                    'paid_amount': group['paid_amount'],
+                    'remaining': group['remaining'],
+                    'status': status,
+                    'sale_ids': group['sale_ids'],
+                    'items': group['items'],
+                })
+            result.sort(key=lambda x: x['sale_date'] or date.min, reverse=True)
+            return result
+    
+    def get_daily_credit_activity(self, customer_id: int, activity_date: date) -> dict:
+        """Return credit sales and payments for a customer on a given date."""
+        with get_session() as session:
+            # Credit sales on that date
+            sales = session.query(ProfessionalSale).options(
+                joinedload(ProfessionalSale.payment_terms)
+            ).filter(
+                ProfessionalSale.customer_id == customer_id,
+                ProfessionalSale.is_credit_sale == True,
+                func.date(ProfessionalSale.created_at) == activity_date,
+                ProfessionalSale.is_deleted == False
+            ).all()
+
+            # Payments on that date – only from credit sales
+            payments = session.query(PaymentTransaction).join(
+                SalePaymentTerm,
+                PaymentTransaction.sale_payment_term_id == SalePaymentTerm.id
+            ).join(
+                ProfessionalSale,
+                SalePaymentTerm.sale_id == ProfessionalSale.id
+            ).filter(
+                ProfessionalSale.customer_id == customer_id,
+                func.date(PaymentTransaction.payment_date) == activity_date,
+                PaymentTransaction.is_deleted == False,
+                # Filter out payments from direct/cash sales
+                or_(
+                    ProfessionalSale.is_credit_sale == True,
+                    SalePaymentTerm.payment_status.in_(
+                        [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]
+                    )
+                )
+            ).all()
+
+            total_sales = sum(s.total_amount for s in sales)
+            total_payments = sum(p.amount for p in payments)
+
+            return {
+                'sales': sales,
+                'payments': payments,
+                'total_sales_amount': total_sales,
+                'total_payments_amount': total_payments,
+                'sale_count': len(sales),
+                'payment_count': len(payments),
+            }
+
+    def get_customers_with_daily_activity(self, activity_date: date) -> list:
+        """Return distinct customer IDs with credit sales or payments on the given date."""
+        with get_session() as session:
+            # Customers with credit sales
+            sale_customers = session.query(ProfessionalSale.customer_id).filter(
+                ProfessionalSale.is_credit_sale == True,
+                func.date(ProfessionalSale.created_at) == activity_date,
+                ProfessionalSale.is_deleted == False
+            ).distinct()
+
+            # Customers with payments
+            payment_customers = session.query(ProfessionalSale.customer_id).select_from(
+                PaymentTransaction
+            ).join(
+                SalePaymentTerm,
+                PaymentTransaction.sale_payment_term_id == SalePaymentTerm.id
+            ).join(
+                ProfessionalSale,
+                SalePaymentTerm.sale_id == ProfessionalSale.id
+            ).filter(
+                func.date(PaymentTransaction.payment_date) == activity_date,
+                PaymentTransaction.is_deleted == False,
+                ProfessionalSale.is_deleted == False
+            ).distinct()
+
+            ids = set()
+            for row in sale_customers.all():
+                ids.add(row[0])
+            for row in payment_customers.all():
+                ids.add(row[0])
+            return list(ids)
+
+    def get_opening_balance_for_date(self, customer_id: int, target_date: date) -> float:
+        """Return the outstanding balance just before the first transaction on target_date."""
+        history = self.get_customer_combined_history(customer_id)
+        for tx in history:
+            tx_date = tx.get('date')
+            if tx_date and tx_date >= target_date:
+                return tx['balance_before']
+        return history[-1]['balance_after'] if history else 0.0
+
+    def was_notification_sent(self, customer_id: int, notification_date: date) -> bool:
+        with get_session() as session:
+            return session.query(CustomerDailyNotification).filter(
+                CustomerDailyNotification.customer_id == customer_id,
+                CustomerDailyNotification.notification_date == notification_date,
+                CustomerDailyNotification.status == 'sent'
+            ).first() is not None
+
+    def mark_notification_sent(self, customer_id: int, notification_date: date,
+                            status='sent', error: str = None):
+        with get_session() as session:
+            record = CustomerDailyNotification(
+                customer_id=customer_id,
+                notification_date=notification_date,
+                status=status,
+                error_message=error[:500] if error else None
+            )
+            session.add(record)
+            session.commit()
+
+    @staticmethod
+    def format_daily_activity_summary(customer_name: str, activity_date: date,
+                                    opening_balance: float, closing_balance: float,
+                                    activity: dict) -> str:
+        lines = [
+            f"📅 *(እለታዊ የዱቤ ማጠቃለያ ለ) {customer_name}*",
+            f"Date (ቀን): {activity_date.strftime('%d/%m/%Y')}",
+            "",
+            f"*የቆየ ቀሪ:* ETB {opening_balance:,.2f}",
+            "",
+        ]
+        if activity['sale_count'] > 0:
+            lines.append(f"🛒 *(አዲስ የገባ የዱቤ ሽያጭ):* {activity['sale_count']} sale(s)   →   + ETB {activity['total_sales_amount']:,.2f}\n")
+        if activity['payment_count'] > 0:
+            lines.append(f"💰 *(የተከፈለ):* {activity['payment_count']} ክፍያዎች   →   - ETB {activity['total_payments_amount']:,.2f}\n")
+        lines.append("")
+        lines.append(f"*ጠቅላላ ቀሪ:* ETB {closing_balance:,.2f}\n\n")
+        lines.append(f"*የአከፋፈል ሁኔታውን ለማየት ከታች የተላከውን pdf ይመልከቱ*\n")
+        lines.append(f"*የተላከሎትን ወይም የወሰዱትን እቃዎች ለማየት ወይም በፈልጉት ሰአት የአከፋፈል ሁኔታ ለማየት*\n")
+        lines.append(f"*start menu -> customer/ደንብኛ -> credit item history ወይም credit payment history ይንኩ፡፡*\n\n")
+        lines.append(f"*==================================================*\n\n")
+        lines.append(f"*developed by: Megazen Systems*\n")
+        lines.append(f"contact us: @Megazenapp/ +251974250852")
+        return "\n".join(lines)
+    
+    def _refresh_json_cache_from_db(self):
+        """Refresh JSON daily cache from database after deletion."""
+        try:
+            cache = DailySalesCacheService()
+            cache.refresh_from_db()
+            logger.info("JSON cache refreshed after sale deletion")
+        except Exception as e:
+            logger.error(f"Failed to refresh JSON cache after deletion: {e}")
+    
+    def delete_payment_group(self, transaction_ids: List[int], user_id: int = None) -> bool:
+        """Delete a group of payment transactions (e.g., same date/bank) and update terms."""
+        with get_session() as session:
+            try:
+                affected_accounts = set()
+                for tid in transaction_ids:
+                    payment = session.query(PaymentTransaction).filter(
+                        PaymentTransaction.id == tid,
+                        PaymentTransaction.is_deleted == False
+                    ).first()
+                    if not payment:
+                        continue
+
+                    term = payment.payment_term
+                    if not term:
+                        continue
+
+                    amount = payment.amount
+                    bank_account_id = payment.bank_account_id
+
+                    # Soft delete payment transaction
+                    payment.is_deleted = True
+                    if user_id:
+                        payment.last_modified_by = user_id
+
+                    # Soft delete associated bank transaction (simplified match)
+                    bank_tx = session.query(BankTransaction).filter(
+                        BankTransaction.sale_payment_term_id == term.id,
+                        BankTransaction.amount == amount,
+                        BankTransaction.bank_account_id == bank_account_id,
+                        BankTransaction.is_deleted == False
+                    ).first()
+                    if bank_tx:
+                        bank_tx.is_deleted = True
+                        if user_id:
+                            bank_tx.last_modified_by = user_id
+                        affected_accounts.add(bank_account_id)
+
+                    # Update payment term
+                    term.paid_amount -= amount
+                    term.update_status()
+
+                # Recalculate balances for all affected accounts (once, after all deletions)
+                for acc_id in affected_accounts:
+                    self.bank_transaction_service.recalculate_balances_for_account(session, acc_id)
+
+                session.commit()
+                return True
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error deleting payment group: {e}", exc_info=True)
+                return False

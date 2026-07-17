@@ -1,0 +1,13 @@
+BATCH MISMATCHES
+{'batch_id': 41, 'product_id': 41, 'expected': 1.0, 'actual': 2.0, 'diff': -1.0}
+{'batch_id': 68, 'product_id': 33, 'expected': 1.0, 'actual': 0.0, 'diff': 1.0}
+{'batch_id': 99, 'product_id': 33, 'expected': 28.0, 'actual': 29.0, 'diff': -1.0}
+{'batch_id': 102, 'product_id': 7, 'expected': 2.0, 'actual': 0.0, 'diff': 2.0}
+{'batch_id': 109, 'product_id': 71, 'expected': 11.0, 'actual': 10.0, 'diff': 1.0}
+{'batch_id': 123, 'product_id': 6, 'expected': 3.0, 'actual': 2.0, 'diff': 1.0}
+{'batch_id': 126, 'product_id': 16, 'expected': 52.0, 'actual': 32.0, 'diff': 20.0}
+{'batch_id': 128, 'product_id': 31, 'expected': 30.0, 'actual': 49.0, 'diff': -19.0}
+
+PRODUCT AVAILABLE MISMATCHES
+
+PRODUCT TOTAL MISMATCHES
