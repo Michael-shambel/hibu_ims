@@ -21,6 +21,7 @@ from ui.pages.sales_page import SalesManager
 from ui.pages.dashboard_page import DashboardManager
 from ui.pages.login_dialog import LoginDialog
 from ui.pages.reports_page import ReportsPage
+from ui.pages.shipment_page import ImportShipmentPage
 from datetime import datetime
 from ui.components.ethiopian_date import EthiopianDateConverter
 from utils import resource_path
@@ -144,7 +145,8 @@ class MainWindow(QMainWindow):
             "Dashboard": DashboardManager,
             "Products": ProductManager,
             "Sales": SalesManager,
-            "Reports": ReportsPage
+            "Reports": ReportsPage,
+            "Shipments": ImportShipmentPage
         }
         self.ethiopian_months = [
             "መስከረም", "ጥቅምት", "ኅዳር", "ታኅሣሥ", "ጥር", "የካቲት",
@@ -264,6 +266,7 @@ class MainWindow(QMainWindow):
         menu_layout.setSpacing(8)
 
         button_info = [
+            ("Shipments", resource_path("assets/free-trade.png"), "#3498db"),
             ("Products", resource_path("assets/9025861_package_box_icon.png"), "#3498db"),
             ("Sales", resource_path("assets/326700_cart_shopping_icon.png"), "#3498db"),
             ("Dashboard", resource_path("assets/9055226_bxs_dashboard_icon.png"), "#3498db"),

@@ -19,6 +19,7 @@ class ProfessionalProduct(BaseModel):
     total_quantity = Column(Integer, default=0, nullable=False)
     available_quantity = Column(Integer, default=0, nullable=False)
     user_id = Column(Integer, ForeignKey('auth_users.id'), nullable=True)
+    supplier_sku = Column(String(100), nullable=True, index=True)
 
     __table_args__ = (
         UniqueConstraint('normalized_name', 'normalized_unit', name='uq_product_normalized'),
