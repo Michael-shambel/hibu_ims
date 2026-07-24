@@ -1,0 +1,42 @@
+
+from enum import Enum
+from sqlalchemy import Column, Integer, ForeignKey, Date, Enum as SQLEnum
+from sqlalchemy.orm import relationship
+from models.engine.database import BaseModel
+
+class ShipmentStatusEnum(str, Enum):
+    DRAFT = "draft"
+    APPROVED = "approved"
+    CANCELLED = "cancelled"
+
+
+class ImportShipment(BaseModel):
+    __tablename__ = "import_shipments"
+
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False)
+    bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=False)
+    proforma_date = Column(Date, nullable=False)
+    exchange_rate = Column(Integer, nullable=False)
+    status = Column(SQLEnum(ShipmentStatusEnum), nullable=False, default=ShipmentStatusEnum.DRAFT)
+    created_by_user_id = Column(Integer, ForeignKey("auth_users.id"), nullable=False)
+
+
+    supplier = relationship("Supplier", foreign_keys=[supplier_id])
+    bank_account = relationship("BankAccount", foreign_keys=[bank_account_id])
+    created_by = relationship("AuthUser", foreign_keys=[created_by_user_id])
+
+    products = relationship(
+        "ShipmentProduct",
+        back_populates="shipment",
+        cascade="all, delete-orphan",
+        lazy="selectin"
+    )
+    costs = relationship(
+        "ShipmentCost",
+        back_populates="shipment",
+        cascade="all, delete-orphan",
+        lazy="selectin"
+    )
+
+    def __repr__(self):
+        return f"<ImportShipment(id={self.id}, supplier={self.supplier_id}, status={self.status})>"
