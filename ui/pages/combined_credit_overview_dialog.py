@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QHeaderView
+    QHeaderView,
+    QSizePolicy
 )
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtGui import QColor, QFont
@@ -26,7 +27,7 @@ class CombinedCreditOverviewDialog(QDialog):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.setWindowTitle("Combined Credit Overview")
-        self.setMinimumSize(1400, 700)
+        self.setMinimumSize(1200, 700)
         self.setWindowFlags(
             Qt.Window
             | Qt.WindowCloseButtonHint
@@ -52,106 +53,115 @@ class CombinedCreditOverviewDialog(QDialog):
         self.load_data()
 
     def init_ui(self):
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(15)
+            main_layout = QVBoxLayout(self)
+            main_layout.setContentsMargins(20, 20, 20, 20)
+            main_layout.setSpacing(15)
 
-        # ---- Summary cards (commented out but kept) ----
-        # summary_layout = QHBoxLayout()
-        # summary_layout.setSpacing(10)
-        # self.matched_card = self.create_summary_card("Matched People", "0", "#3498db")
-        # self.receivable_card = self.create_summary_card("Customers Owe", "$0.00", "#27ae60")
-        # self.payable_card = self.create_summary_card("We Owe", "$0.00", "#e74c3c")
-        # self.net_card = self.create_summary_card("Net Balance", "$0.00", "#34495e")
-        # summary_layout.addWidget(self.matched_card)
-        # summary_layout.addWidget(self.receivable_card)
-        # summary_layout.addWidget(self.payable_card)
-        # summary_layout.addWidget(self.net_card)
-        # main_layout.addLayout(summary_layout)
+            # ---- Search bar ----
+            search_layout = QHBoxLayout()
+            search_layout.setContentsMargins(0, 5, 0, 5)
 
-        # ---- Search bar ----
-        search_layout = QHBoxLayout()
-        search_layout.setContentsMargins(0, 5, 0, 5)
-        search_label = QLabel("Search:")
-        search_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Type to filter by name, direction, or amount...")
-        self.search_edit.setMinimumHeight(35)
-        self.search_edit.setStyleSheet("font-size: 14px; padding: 5px;")
-        self.search_edit.textChanged.connect(self.filter_table)
+            refresh_btn = QPushButton("🔄 Refresh")
+            refresh_btn.setFixedSize(130, 44)
+            refresh_btn.setCursor(Qt.PointingHandCursor)
+            refresh_btn.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            refresh_btn.setStyleSheet(self._button_style("#3498db", "#2980b9"))
+            refresh_btn.clicked.connect(self.load_data)
 
-        refresh_btn = QPushButton("Refresh")
-        refresh_btn.setFixedSize(110, 35)
-        refresh_btn.setCursor(Qt.PointingHandCursor)
-        refresh_btn.clicked.connect(self.load_data)
-        refresh_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-weight: bold;
-                font-size: 13px;
-            }
-            QPushButton:hover { background-color: #2980b9; }
-        """)
+            search_label = QLabel("🔍 Search:")
+            search_label.setFont(QFont("Segoe UI", 14, QFont.Bold))
+            search_label.setStyleSheet("color: #2c3e50;")
 
-        search_layout.addWidget(refresh_btn)
-        search_layout.addWidget(search_label)
-        search_layout.addWidget(self.search_edit)
-        main_layout.addLayout(search_layout)
+            self.search_edit = QLineEdit()
+            self.search_edit.setPlaceholderText("Filter by name, phone, direction, amount...")
+            self.search_edit.setMinimumHeight(42)
+            self.search_edit.setFont(QFont("Segoe UI", 14))
+            self.search_edit.setStyleSheet("""
+                QLineEdit {
+                    border: 1px solid #d1d5db;
+                    border-radius: 6px;
+                    padding: 8px 14px;
+                    font-size: 14px;
+                    background-color: white;
+                }
+                QLineEdit:focus {
+                    border: 1px solid #3b82f6;
+                }
+            """)
+            self.search_edit.textChanged.connect(self.filter_table)
 
-        # ---- Table ----
-        self.table = QTableWidget()
-        headers = ["Name", "Phone", "Yabedernew", "yetebedernew", "Direction", "Net Balance", "Actions"]
-        self.table.setColumnCount(len(headers))
-        self.table.setHorizontalHeaderLabels(headers)
+            search_layout.addWidget(refresh_btn)
+            search_layout.addWidget(search_label)
+            search_layout.addWidget(self.search_edit, 1)
+            main_layout.addLayout(search_layout)
 
-        self.table.setColumnWidth(0, 200)   # Name
-        self.table.setColumnWidth(1, 120)   # Phone
-        self.table.setColumnWidth(2, 150)   # Yabedernew
-        self.table.setColumnWidth(3, 150)   # yetebedernew
-        self.table.setColumnWidth(4, 120)   # Direction
-        self.table.setColumnWidth(5, 150)   # Net Balance
-        self.table.setColumnWidth(6, 200)   # Actions
+            # ---- Table ----
+            self.table = QTableWidget()
+            headers = [
+                "Name", "Phone", "Credit Sales", "Credit Purchases",
+                "Cash Given", "Cash Received", "Direction", "Net Balance", "Actions"
+            ]
+            self.table.setColumnCount(len(headers))
+            self.table.setHorizontalHeaderLabels(headers)
 
-        # Ensure the last column is not stretched
-        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Fixed)
+            # Set minimum widths for all columns
+            self.table.setColumnWidth(0, 180)  # Name
+            self.table.setColumnWidth(1, 120)  # Phone
+            self.table.setColumnWidth(2, 130)  # Credit Sales
+            self.table.setColumnWidth(3, 140)  # Credit Purchases
+            self.table.setColumnWidth(4, 130)  # Cash Given
+            self.table.setColumnWidth(5, 140)  # Cash Received
+            self.table.setColumnWidth(6, 130)  # Direction
+            self.table.setColumnWidth(7, 130)  # Net Balance
+            self.table.setColumnWidth(8, 320)  # Actions – fixed width
 
-        self.table.setAlternatingRowColors(True)
-        self.table.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        self.table.verticalHeader().setDefaultSectionSize(58)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setStyleSheet("""
-            QTableWidget {
-                font-size: 15px;
-                font-weight: bold;
-                background-color: white;
-                alternate-background-color: #f8f9fa;
-                gridline-color: #dee2e6;
-                border: 1px solid #dee2e6;
-                border-radius: 6px;
-            }
-            QHeaderView::section {
-                background-color: #2c3e50;
-                color: white;
-                padding: 12px;
-                font-weight: bold;
-                font-size: 15px;
-                border: none;
-            }
-            QTableWidget::item {
-                padding: 10px;
-            }
-        """)
-        main_layout.addWidget(self.table, 1)
+            # Resize modes – stretch most columns, keep Actions fixed
+            header = self.table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.Stretch)          # Name
+            header.setSectionResizeMode(1, QHeaderView.ResizeToContents) # Phone
+            header.setSectionResizeMode(2, QHeaderView.Stretch)          # Credit Sales
+            header.setSectionResizeMode(3, QHeaderView.Stretch)          # Credit Purchases
+            header.setSectionResizeMode(4, QHeaderView.Stretch)          # Cash Given
+            header.setSectionResizeMode(5, QHeaderView.Stretch)          # Cash Received
+            header.setSectionResizeMode(6, QHeaderView.ResizeToContents) # Direction
+            header.setSectionResizeMode(7, QHeaderView.ResizeToContents) # Net Balance
+            header.setSectionResizeMode(8, QHeaderView.Fixed)            # Actions – fixed!
 
-        self.loading_label = QLabel("Loading combined credit data, please wait...")
-        self.loading_label.setAlignment(Qt.AlignCenter)
-        self.loading_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        self.loading_label.hide()
-        main_layout.addWidget(self.loading_label)
+            self.table.setAlternatingRowColors(True)
+            self.table.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            self.table.verticalHeader().setDefaultSectionSize(60)
+            self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+            self.table.setSelectionBehavior(QTableWidget.SelectRows)
+
+            self.table.setStyleSheet("""
+                QTableWidget {
+                    font-size: 14px;
+                    font-weight: bold;
+                    background-color: white;
+                    alternate-background-color: #f8f9fa;
+                    gridline-color: #dee2e6;
+                    border: 1px solid #dee2e6;
+                    border-radius: 8px;
+                }
+                QHeaderView::section {
+                    background-color: #2c3e50;
+                    color: white;
+                    padding: 12px;
+                    font-weight: bold;
+                    font-size: 14px;
+                    border: none;
+                }
+                QTableWidget::item {
+                    padding: 10px;
+                }
+            """)
+            main_layout.addWidget(self.table, 1)
+
+            self.loading_label = QLabel("Loading combined credit data, please wait...")
+            self.loading_label.setAlignment(Qt.AlignCenter)
+            self.loading_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            self.loading_label.hide()
+            main_layout.addWidget(self.loading_label)
 
     def create_summary_card(self, title, value, color_hex):
         card = QFrame()
@@ -244,10 +254,10 @@ class CombinedCreditOverviewDialog(QDialog):
     #         f"${self.summary.get('abs_net_balance', 0.0):,.2f} {direction}"
     #     )
 
-    def _set_card_value(self, card, value):
-        label = card.findChild(QLabel, "value_label")
-        if label:
-            label.setText(value)
+    # def _set_card_value(self, card, value):
+    #     label = card.findChild(QLabel, "value_label")
+    #     if label:
+    #         label.setText(value)
 
     def populate_table(self, data=None):
         if data is None:
@@ -256,11 +266,11 @@ class CombinedCreditOverviewDialog(QDialog):
         self.table.setRowCount(len(data))
         for row, item in enumerate(data):
             name_item = QTableWidgetItem(item["name"])
-            name_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            name_item.setFont(QFont("Segoe UI", 10, QFont.Bold))
             self.table.setItem(row, 0, name_item)
 
             phone_item = QTableWidgetItem(item.get("phone", ""))
-            phone_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            phone_item.setFont(QFont("Segoe UI", 10, QFont.Bold))
             phone_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 1, phone_item)
 
@@ -272,16 +282,24 @@ class CombinedCreditOverviewDialog(QDialog):
             purchases_item.setForeground(QColor("#e74c3c"))
             self.table.setItem(row, 3, purchases_item)
 
+            loan_receivable_item = self._amount_item(item.get("loan_receivable_remaining", 0.0))
+            loan_receivable_item.setForeground(QColor("#16a085"))
+            self.table.setItem(row, 4, loan_receivable_item)
+
+            loan_payable_item = self._amount_item(item.get("loan_payable_remaining", 0.0))
+            loan_payable_item.setForeground(QColor("#8e44ad"))
+            self.table.setItem(row, 5, loan_payable_item)
+
             direction_item = QTableWidgetItem(item["direction"])
-            direction_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            direction_item.setFont(QFont("Segoe UI", 10, QFont.Bold))
             direction_item.setTextAlignment(Qt.AlignCenter)
-            if item["direction"] == "wede egna":
+            if item["direction"] == "WEDE EGNA":
                 direction_item.setForeground(QColor("#27ae60"))
-            elif item["direction"] == "Wede esu":
+            elif item["direction"] == "WEDE ESU":
                 direction_item.setForeground(QColor("#e74c3c"))
             else:
                 direction_item.setForeground(QColor("#7f8c8d"))
-            self.table.setItem(row, 4, direction_item)
+            self.table.setItem(row, 6, direction_item)
 
             net_item = self._amount_item(item["abs_net_balance"])
             if item["net_balance"] > 0.01:
@@ -290,25 +308,27 @@ class CombinedCreditOverviewDialog(QDialog):
                 net_item.setForeground(QColor("#e74c3c"))
             else:
                 net_item.setForeground(QColor("#7f8c8d"))
-            self.table.setItem(row, 5, net_item)
+            self.table.setItem(row, 7, net_item)
 
-            self.table.setCellWidget(row, 6, self.create_action_buttons(item))
+            self.table.setCellWidget(row, 8, self.create_action_buttons(item))
 
     def _amount_item(self, value):
         table_item = QTableWidgetItem(f"${value:,.2f}")
-        table_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        table_item.setFont(QFont("Segoe UI", 10, QFont.Bold))
         table_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         return table_item
 
     def create_action_buttons(self, item):
         widget = QWidget()
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(5, 0, 5, 0)
-        layout.setSpacing(8)
+        widget.setMinimumWidth(310)  # ensure widget has enough space
+        widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        # 🔧 Reduced button sizes to save space
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(4, 0, 4, 0)
+        layout.setSpacing(6)  # tighter spacing
+
         sales_btn = QPushButton("Sales")
-        sales_btn.setFixedSize(80, 35)      # was 100x38
+        sales_btn.setFixedSize(85, 38)
         sales_btn.setCursor(Qt.PointingHandCursor)
         sales_btn.setEnabled(bool(item["sale_ids"]))
         sales_btn.setToolTip("View this person's credit sales")
@@ -316,15 +336,24 @@ class CombinedCreditOverviewDialog(QDialog):
         sales_btn.clicked.connect(lambda checked, row=item: self.view_sales(row))
 
         purchases_btn = QPushButton("Purchases")
-        purchases_btn.setFixedSize(90, 35)   # was 110x38
+        purchases_btn.setFixedSize(90, 38)
         purchases_btn.setCursor(Qt.PointingHandCursor)
         purchases_btn.setEnabled(bool(item["purchase_ids"]))
         purchases_btn.setToolTip("View this person's credit purchases")
         purchases_btn.setStyleSheet(self._button_style("#e74c3c", "#c0392b"))
         purchases_btn.clicked.connect(lambda checked, row=item: self.view_purchases(row))
 
+        loans_btn = QPushButton("Loans")
+        loans_btn.setFixedSize(80, 38)
+        loans_btn.setCursor(Qt.PointingHandCursor)
+        loans_btn.setEnabled(bool(item.get("loan_ids")))
+        loans_btn.setToolTip("View this person's cash loans")
+        loans_btn.setStyleSheet(self._button_style("#8e44ad", "#7d3c98"))
+        loans_btn.clicked.connect(lambda checked, row=item: self.view_loans(row))
+
         layout.addWidget(sales_btn)
         layout.addWidget(purchases_btn)
+        layout.addWidget(loans_btn)
         return widget
 
     @staticmethod
@@ -358,6 +387,8 @@ class CombinedCreditOverviewDialog(QDialog):
                     item["direction"],
                     f"${item['credit_sales_remaining']:,.2f}",
                     f"${item['credit_purchases_remaining']:,.2f}",
+                    f"${item.get('loan_receivable_remaining', 0.0):,.2f}",
+                    f"${item.get('loan_payable_remaining', 0.0):,.2f}",
                     f"${item['abs_net_balance']:,.2f}",
                 ]
                 if any(self.search_text in value.lower() for value in searchable):
@@ -379,35 +410,25 @@ class CombinedCreditOverviewDialog(QDialog):
         dialog.setModal(False)
         dialog.show()
 
-    def view_purchases(self, row):
-        if not row["purchase_ids"]:
+    def view_purchases(self, item):
+        if not item["supplier_ids"]:
+            QMessageBox.information(self, "Info", "No supplier IDs found for this entry.")
             return
-
-        first_purchase_id = row["purchase_ids"][0]
-
-        from services.base_service import get_session
-        from models.purchase import Purchase
-        from models.supplier import Supplier
-
-        with get_session() as session:
-            purchase = session.query(Purchase).get(first_purchase_id)
-            if not purchase:
-                QMessageBox.warning(self, "Error", "Could not find the purchase record.")
-                return
-            supplier_id = purchase.supplier_id
-            supplier_name = row["name"]   # fallback name
-            if supplier_id:
-                supplier = session.query(Supplier).get(supplier_id)
-                if supplier:
-                    supplier_name = supplier.supplier_name
-
+        supplier_id = item["supplier_ids"][0]
         from ui.pages.credit_purchases_overview_dialog import SupplierPurchasesListDialog
         dialog = SupplierPurchasesListDialog(
             self,
-            supplier_name,
+            item["name"],
             supplier_id,
             self.current_user
         )
+        dialog.setModal(False)
+        dialog.show()
+    
+    def view_loans(self, item):
+        from ui.pages.cash_loans_dialog import CashLoansOverviewDialog
+
+        dialog = CashLoansOverviewDialog(self, self.current_user, initial_search=item["name"])
         dialog.setModal(False)
         dialog.show()
 

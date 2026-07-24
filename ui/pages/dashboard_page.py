@@ -11,6 +11,7 @@ from services.purchase_service import PurchaseService
 from services.expense_service import ExpenseService
 from services.bank_transaction_service import BankTransactionService
 from services.combined_credit_service import CombinedCreditService
+from services.cash_loan_service import CashLoanService
 from ui.pages.sales_card_dialog import SalesDetailDialog, LabourExpenseDialog, AllSalesOverviewDialog
 from ui.pages.stock_value_dialog import StockValueDialog
 from ui.pages.bank_balance_dialog import BankBalanceDialog
@@ -33,13 +34,14 @@ class DashboardManager(QWidget):
         self.expense_service = ExpenseService()   # <-- NEW
         self.bank_transaction_service = BankTransactionService()
         self.combined_credit_service = CombinedCreditService()
-
+        self.cash_loan_service = CashLoanService()
         self.today_summary = None
         self.yesterday_summary = None
         self.credit_sales_summary = None
         self.all_sales_count = None
         self.credit_purchases_summary = None
         self.combined_credit_summary = None
+        self.cash_loan_summary = None
         self.despatched_count = None
         self.not_despatched_count = None
 
@@ -241,7 +243,8 @@ class DashboardManager(QWidget):
         card_info = [
             ("Profit", "#27ae60", self.show_profit_details),
             ("Expenses", "#e74c3c", self.show_expenses_details),
-            ("Bank Balance", "#3498db", self.show_bank_balance_details)
+            ("Bank Balance", "#3498db", self.show_bank_balance_details),
+            ("Cash Loans", "#8e44ad", self.show_cash_loans_overview)
         ]
 
         for title, color, handler in card_info:
@@ -382,6 +385,7 @@ class DashboardManager(QWidget):
 
         credit_purchases_summary = self.purchase_service.get_credit_purchases_summary()
         combined_credit_summary = self.combined_credit_service.get_combined_credit_summary()
+        cash_loan_summary = self.cash_loan_service.get_cash_loan_summary()
         despatched_count = self.sale_service.count_despatch_status_sales(True)
         not_despatched_count = self.sale_service.count_despatch_status_sales(False)
 
@@ -432,6 +436,7 @@ class DashboardManager(QWidget):
             'all_sales_count': all_sales_count,
             'credit_purchases_summary': credit_purchases_summary,
             'combined_credit_summary': combined_credit_summary,
+            'cash_loan_summary': cash_loan_summary,
             'despatched_count': despatched_count,
             'not_despatched_count': not_despatched_count,
             'cash_expenses_today': cash_expenses_today,
@@ -459,6 +464,7 @@ class DashboardManager(QWidget):
         self.all_sales_count = data['all_sales_count']
         self.credit_purchases_summary = data['credit_purchases_summary']
         self.combined_credit_summary = data['combined_credit_summary']
+        self.cash_loan_summary = data['cash_loan_summary']
         self.despatched_count = data['despatched_count']
         self.not_despatched_count = data['not_despatched_count']
         self.cash_expenses_today = data['cash_expenses_today']
@@ -487,6 +493,7 @@ class DashboardManager(QWidget):
         self._update_card_value_in_dict(self.financial_cards, "Profit", data['profit'])
         self._update_card_value_in_dict(self.financial_cards, "Expenses", data['expenses'])
         self._update_card_value_in_dict(self.financial_cards, "Bank Balance", data['bank_balance'])
+        self._update_card_value_in_dict(self.financial_cards, "Cash Loans", f"{data['cash_loan_summary']['open_count']} Open")
 
         current_time = datetime.now().strftime("%H:%M:%S")
         self.last_updated_label.setText(f"Last updated: {current_time}")
@@ -593,6 +600,14 @@ class DashboardManager(QWidget):
         dialog.setModal(False)
         dialog.finished.connect(self.refresh)
         dialog.show()
+    
+    def show_cash_loans_overview(self):
+        from ui.pages.cash_loans_dialog import CashLoansOverviewDialog
+        dialog = CashLoansOverviewDialog(self, self.current_user)
+        dialog.setModal(False)
+        dialog.finished.connect(self.refresh)
+        dialog.show()
+
 
     def show_despatched_sales(self):
         from ui.pages.sales_card_dialog import DespatchSalesDialog

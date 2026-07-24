@@ -2,14 +2,15 @@
 from datetime import date
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableWidget,
-    QTableWidgetItem, QHeaderView, QMessageBox, QFrame, QLineEdit, QApplication
+    QTableWidgetItem, QMessageBox, QFrame, QLineEdit, QApplication, QComboBox
 )
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtGui import QFont, QColor
 from services.new_sale_service import NewSaleService
-from ui.pages.sales_card_dialog import SaleItemsDialog, CustomerSalesListDialog
+from ui.pages.sales_card_dialog import CustomerSalesListDialog
 from ui.pages.credit_payment_dialog import CreditPaymentDialog
 from ui.utils.worker import Worker
+
 
 class CreditSalesOverviewDialog(QDialog):
     def __init__(self, parent, current_user, filter_short_term_only=False):
@@ -27,26 +28,37 @@ class CreditSalesOverviewDialog(QDialog):
         self.current_user = current_user
         self.sale_service = NewSaleService()
         self.filter_short_term_only = filter_short_term_only
+
+        # Pagination state
+        self.current_page = 1
+        self.page_size = 50
+        self.total_pages = 1
+        self.total_customers = 0
+
         self.summary = {}
-        self.customer_data = []
-        self.filtered_data = []
+        self.customer_data = []      # data for current page
+        self.filtered_data = []      # filtered subset of current page
         self.search_text = ""
-        self.init_ui()
-        self.setMinimumSize(0, 0)
-        self.setMaximumSize(16777215, 16777215)
-        screen_geometry = QApplication.primaryScreen().availableGeometry()
-        self.setGeometry(screen_geometry)
+
         self.is_loading = False
         self.thread = None
         self.worker = None
         self._closed = False
+
+        self.init_ui()
+        # Maximise to screen
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
+        screen_geometry = QApplication.primaryScreen().availableGeometry()
+        self.setGeometry(screen_geometry)
+
         self.load_data()
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # Search bar
+        # ---------- Search bar ----------
         search_layout = QHBoxLayout()
         search_layout.setContentsMargins(0, 15, 0, 15)
         search_label = QLabel("Search:")
@@ -73,7 +85,7 @@ class CreditSalesOverviewDialog(QDialog):
         search_layout.addWidget(self.total_unpaid_label)
         main_layout.addLayout(search_layout)
 
-        # Table
+        # ---------- Table ----------
         self.table = QTableWidget()
         headers = ["Customer", "Total", "Paid", "Remaining", "Status", "Actions"]
         self.table.setColumnCount(len(headers))
@@ -115,64 +127,41 @@ class CreditSalesOverviewDialog(QDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         main_layout.addWidget(self.table, 1)
 
-        # Loading indicator
+        # ---------- Pagination bar ----------
+        pagination_layout = QHBoxLayout()
+        pagination_layout.setContentsMargins(0, 10, 0, 10)
+
+        self.prev_btn = QPushButton("◀ Previous")
+        self.prev_btn.clicked.connect(self.prev_page)
+        self.prev_btn.setEnabled(False)
+
+        self.next_btn = QPushButton("Next ▶")
+        self.next_btn.clicked.connect(self.next_page)
+        self.next_btn.setEnabled(False)
+
+        self.page_label = QLabel("Page 1 of 1")
+        self.page_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+
+        self.page_size_combo = QComboBox()
+        self.page_size_combo.addItems(["20", "50", "100", "200"])
+        self.page_size_combo.setCurrentText("50")
+        self.page_size_combo.currentTextChanged.connect(self.on_page_size_changed)
+
+        pagination_layout.addWidget(self.prev_btn)
+        pagination_layout.addWidget(self.page_label)
+        pagination_layout.addWidget(self.next_btn)
+        pagination_layout.addStretch()
+        pagination_layout.addWidget(QLabel("Rows per page:"))
+        pagination_layout.addWidget(self.page_size_combo)
+
+        main_layout.addLayout(pagination_layout)
+
+        # ---------- Loading indicator ----------
         self.loading_label = QLabel("Loading credit sales data, please wait...")
         self.loading_label.setAlignment(Qt.AlignCenter)
         self.loading_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
         self.loading_label.hide()
         main_layout.addWidget(self.loading_label)
-
-
-    def create_summary_card(self, title, value, color_hex):
-        card = QFrame()
-        card.setStyleSheet(f"""
-            QFrame {{
-                background-color: #FFFFFF;
-                border-radius: 8px;
-                border: 1px solid #E0E0E0;
-                min-width: 200px;
-                max-width: 240px;
-            }}
-        """)
-        card.setFixedHeight(120)
-
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        header = QLabel(title)
-        header.setStyleSheet(f"""
-            QLabel {{
-                background-color: {color_hex};
-                color: white;
-                font-weight: bold;
-                padding: 14px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                font-size: 14px;
-            }}
-        """)
-        header.setAlignment(Qt.AlignCenter)
-        header.setFont(QFont("Segoe UI", 12, QFont.Bold))
-
-        value_label = QLabel(value)
-        value_label.setObjectName("value_label")
-        value_label.setStyleSheet("""
-            QLabel {
-                background-color: white;
-                color: #2c3e50;
-                padding: 18px 10px;
-                border-bottom-left-radius: 8px;
-                border-bottom-right-radius: 8px;
-                font-size: 18px;
-                font-weight: bold;
-            }
-        """)
-        value_label.setAlignment(Qt.AlignCenter)
-        value_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
-
-        layout.addWidget(header)
-        layout.addWidget(value_label)
-        return card
 
     def load_data(self):
         if self.is_loading:
@@ -180,8 +169,9 @@ class CreditSalesOverviewDialog(QDialog):
         self.is_loading = True
         self.loading_label.show()
         self.table.hide()
+
         self.thread = QThread()
-        self.worker = Worker(self._fetch_data)
+        self.worker = Worker(self._fetch_data)   # <-- will now use current search_text
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.finished.connect(self.on_data_loaded)
@@ -193,48 +183,35 @@ class CreditSalesOverviewDialog(QDialog):
 
     def _fetch_data(self):
         summary = self.sale_service.get_credit_sales_summary()
-        customers = self.sale_service.get_credit_sales_by_customer()
-        return summary, customers
+        customers, total = self.sale_service.get_credit_customers_paginated(
+            page=self.current_page,
+            page_size=self.page_size,
+            short_term_only=self.filter_short_term_only,
+            search=self.search_text   # pass the search term
+        )
+        return summary, customers, total
 
     def on_data_loaded(self, result):
         if self._closed:
             return
         self.is_loading = False
-        summary, customers = result
-        for cust in customers:
-            if 'sale_ids' in cust and cust['sale_ids']:
-                all_sales = self.sale_service.get_credit_sales_by_ids(cust['sale_ids'])
-                # keep only sales that still have a remaining balance
-                outstanding = [s for s in all_sales if s.get('remaining', 0) > 0]
-                if outstanding:
-                    cust['total_amount'] = sum(s['total_amount'] for s in outstanding)
-                    cust['paid_amount'] = sum(s['paid_amount'] for s in outstanding)
-                    cust['remaining'] = cust['total_amount'] - cust['paid_amount']
-                else:
-                    # This customer no longer has any outstanding – will be removed later
-                    cust['remaining'] = 0
-            else:
-                cust['remaining'] = 0
+        summary, customers, total = result
+
         self.summary = summary
+        self.total_customers = total
+        self.total_pages = (total + self.page_size - 1) // self.page_size if total > 0 else 1
+
+        # Update pagination controls
+        self.prev_btn.setEnabled(self.current_page > 1)
+        self.next_btn.setEnabled(self.current_page < self.total_pages)
+        self.page_label.setText(f"Page {self.current_page} of {self.total_pages} ({total} customers)")
+
+        # Store data for this page (already sorted by service: unpaid first, then paid)
         self.customer_data = customers
+        self.filtered_data = customers.copy()   # search will work on current page
 
-        # 1. Remove fully paid customers
-        self.customer_data = [c for c in self.customer_data if c['remaining'] > 0]
-
-        # 2. Apply short‑term filter if requested (modify the master list)
-        if self.filter_short_term_only:
-            self.customer_data = [c for c in self.customer_data if c.get('has_short_term', False)]
-
-        # 3. Sort by remaining amount (descending)
-        self.customer_data.sort(key=lambda x: x['remaining'], reverse=True)
-
-        # 4. Initialise filtered_data with the (possibly filtered) master list
-        self.filtered_data = self.customer_data.copy()
-
-        # 5. Update total unpaid label (using the original summary, which is fine)
         self.total_unpaid_label.setText(f"Total Unpaid: ${self.summary['total_unpaid']:,.2f}")
 
-        # 6. Populate table (no search text change that would trigger filter_table)
         self.populate_table()
         self.loading_label.hide()
         self.table.show()
@@ -247,6 +224,23 @@ class CreditSalesOverviewDialog(QDialog):
         self.loading_label.hide()
         self.table.show()
 
+    # ================== Pagination ==================
+    def prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.load_data()
+
+    def next_page(self):
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+            self.load_data()
+
+    def on_page_size_changed(self, new_size):
+        self.page_size = int(new_size)
+        self.current_page = 1
+        self.load_data()
+
+    # ================== Table population ==================
     def populate_table(self, data=None):
         if data is None:
             data = self.filtered_data
@@ -286,30 +280,34 @@ class CreditSalesOverviewDialog(QDialog):
             row_color = None
             tooltip = ""
 
-            if due_date and remaining > 0:
-                days = (today - due_date).days
-                if days > 0:                      # Overdue
-                    if has_short:
-                        row_color = QColor(255, 140, 105)   # #FF8C69
-                        tooltip = f"Overdue short‑term by {days} day(s)"
-                    else:
-                        row_color = QColor(255, 179, 179)   # #FFB3B3
-                        tooltip = f"Overdue long‑term by {days} day(s)"
-                elif days == 0:                   # Due today
-                    if has_short:
-                        row_color = QColor(255, 217, 102)   # #FFD966
-                        tooltip = "Due today (short‑term)"
-                    else:
-                        row_color = QColor(255, 255, 179)   # #FFFFB3
-                        tooltip = "Due today (long‑term)"
-                else:                             # Future due (days < 0)
-                    if has_short:
-                        row_color = QColor(255, 229, 204)   # #FFE5CC
-                        tooltip = f"Short‑term credit, due in {abs(days)} day(s)"
-            elif has_short and remaining > 0:
-                # Short‑term but no due date (fallback)
-                row_color = QColor(255, 229, 204)
-                tooltip = "Short‑term credit"
+            if remaining == 0:
+                row_color = QColor(220, 220, 220)   # Light grey
+                tooltip = "Fully paid"
+            else:
+                if due_date and remaining > 0:
+                    days = (today - due_date).days
+                    if days > 0:                      # Overdue
+                        if has_short:
+                            row_color = QColor(255, 140, 105)   # #FF8C69
+                            tooltip = f"Overdue short‑term by {days} day(s)"
+                        else:
+                            row_color = QColor(255, 179, 179)   # #FFB3B3
+                            tooltip = f"Overdue long‑term by {days} day(s)"
+                    elif days == 0:                   # Due today
+                        if has_short:
+                            row_color = QColor(255, 217, 102)   # #FFD966
+                            tooltip = "Due today (short‑term)"
+                        else:
+                            row_color = QColor(255, 255, 179)   # #FFFFB3
+                            tooltip = "Due today (long‑term)"
+                    else:                             # Future due (days < 0)
+                        if has_short:
+                            row_color = QColor(255, 229, 204)   # #FFE5CC
+                            tooltip = f"Short‑term credit, due in {abs(days)} day(s)"
+                elif has_short and remaining > 0:
+                    # Short‑term but no due date (fallback)
+                    row_color = QColor(255, 229, 204)
+                    tooltip = "Short‑term credit"
 
             if tooltip:
                 status_item.setToolTip(tooltip)
@@ -384,11 +382,6 @@ class CreditSalesOverviewDialog(QDialog):
                 # Also colour the actions widget background
                 actions_widget.setStyleSheet(f"background-color: {row_color.name()};")
 
-        # total = len(self.customer_data)
-        # visible = len(data)
-        # filter_text = f" (Filter: '{self.search_edit.text()}')" if self.search_edit.text() else ""
-        # self.status_label.setText(f"Showing {visible} of {total} customers{filter_text}")
-
     def _amount_item(self, value):
         item = QTableWidgetItem(f"${value:,.2f}")
         item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -396,44 +389,24 @@ class CreditSalesOverviewDialog(QDialog):
         return item
 
     def filter_table(self, text):
-        self.search_text = text.lower()
-        if not self.search_text:
-            self.filtered_data = self.customer_data.copy()
-        else:
-            filtered = []
-            for cust in self.customer_data:
-                if self.search_text in cust['customer_name'].lower():
-                    filtered.append(cust)
-                    continue
-                if self.search_text in cust['status'].lower():
-                    filtered.append(cust)
-                    continue
-                amount_str = f"${cust['total_amount']:,.2f}".lower()
-                if self.search_text in amount_str:
-                    filtered.append(cust)
-                    continue
-                amount_str = f"${cust['paid_amount']:,.2f}".lower()
-                if self.search_text in amount_str:
-                    filtered.append(cust)
-                    continue
-                amount_str = f"${cust['remaining']:,.2f}".lower()
-                if self.search_text in amount_str:
-                    filtered.append(cust)
-                    continue
-            filtered.sort(key=lambda x: x['remaining'], reverse=True)
-            self.filtered_data = filtered
-        self.populate_table()
+        """
+        Trigger a server‑side search across all customers.
+        Resets to page 1 and reloads data with the search term.
+        """
+        self.search_text = text.strip()   # store search term (remove extra spaces)
+        self.current_page = 1             # go back to first page for search results
+        self.load_data()                  # reload data from database with search filter
 
     def view_customer_sales(self, cust):
         dialog = CustomerSalesListDialog(
             self,
             cust['customer_name'],
-            cust['sale_ids'],
-            self.current_user
+            sale_ids=None,          # not needed anymore
+            current_user=self.current_user,
+            customer_id=cust['customer_id']   # pass customer_id
         )
         dialog.setModal(False)
         dialog.show()
-        # self.load_data()
 
     def pay_customer(self, cust):
         dialog = CreditPaymentDialog(
@@ -444,7 +417,7 @@ class CreditSalesOverviewDialog(QDialog):
             current_user=self.current_user
         )
         if dialog.exec() == QDialog.Accepted:
-            self.load_data()
+            self.load_data()   # refresh current page
 
     def show_payment_history(self, cust):
         from ui.pages.sales_card_dialog import CreditPaymentHistoryDialog
@@ -457,16 +430,13 @@ class CreditSalesOverviewDialog(QDialog):
         dialog.setModal(False)
         dialog.finished.connect(self.load_data)
         dialog.show()
-        # self.load_data()
-    
+
     def closeEvent(self, event):
-        """Stop background thread before closing to avoid accessing deleted widgets."""
         self._closed = True
         try:
             if hasattr(self, 'thread') and self.thread is not None and self.thread.isRunning():
                 self.thread.quit()
                 self.thread.wait(2000)
         except RuntimeError:
-            # Underlying C++ object already deleted – nothing to do
             pass
         event.accept()

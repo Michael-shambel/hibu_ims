@@ -16,8 +16,8 @@ from config import BOT_TOKEN, ADMIN_ID
 logger = logging.getLogger(__name__)
 
 # Timeouts
-_FAST_SEND_TIMEOUT = 25.0          # order_notification, admin alerts
-_REPORT_SEND_TIMEOUT = 120.0       # PDF reports (was 60.0)
+_FAST_SEND_TIMEOUT = 60.0          # order_notification, admin alerts
+_REPORT_SEND_TIMEOUT = 240.0       # PDF reports (was 60.0)
 
 REPORT_NOTIFICATION_TYPES = {
     'daily_sales_report',
@@ -34,7 +34,7 @@ def _make_bot() -> Bot:
     """Create a Bot instance with generous HTTP timeouts to avoid false timeouts."""
     request = HTTPXRequest(
         connect_timeout=10.0,
-        read_timeout=60.0,          # large PDF uploads need more time
+        read_timeout=300.0,          # large PDF uploads need more time
         write_timeout=30.0,
         pool_timeout=5.0,
     )
@@ -51,6 +51,9 @@ DEDUP_TYPES = {
     'supplier_summary_admin',
     'monthly_profit_report',
     'order_notification',
+    'despatch_notification',
+    'sale_cancellation',
+    'purchase_notification',
 }
 
 def _get_dedup_key(notification_type: str, payload: dict, chat_id: int):
@@ -80,6 +83,24 @@ def _get_dedup_key(notification_type: str, payload: dict, chat_id: int):
         if sale_id is not None:
             return ('order_notification', sale_id, chat_id)
         return ('order_notification', hash(payload.get('text', '')), chat_id)
+    
+    elif notification_type == 'despatch_notification':
+        sale_id = payload.get('sale_id')
+        if sale_id is not None:
+            return ('despatch_notification', sale_id, chat_id)
+        return ('despatch_notification', hash(payload.get('text', '')), chat_id)
+    
+    elif notification_type == 'sale_cancellation':
+        sale_id = payload.get('sale_id')
+        if sale_id is not None:
+            return (notification_type, sale_id, chat_id)
+        return (notification_type, hash(payload.get('text', '')), chat_id)
+    
+    elif notification_type == 'purchase_notification':
+        purchase_id = payload.get('purchase_id')
+        if purchase_id is not None:
+            return (notification_type, purchase_id, chat_id)
+        return (notification_type, hash(payload.get('text', '')), chat_id)
 
     return None
 
@@ -244,6 +265,11 @@ async def process_pending_notifications():
                 await asyncio.to_thread(_mark_sent, notif_id)
                 continue
 
+            if _has_pending_duplicate(nt, payload, chat_id, notif_id):
+                logger.info("Skipping duplicate pending notification %d", notif_id)
+                await asyncio.to_thread(_mark_sent, notif_id)
+                continue
+
             # Dispatch with notif_id for step tracking
             await _dispatch_notification(bot, nt, chat_id, payload, notif_id)
             await asyncio.to_thread(_mark_sent, notif_id)
@@ -281,6 +307,28 @@ def _mark_failed(notif_id: int, retry_count: int, next_retry: datetime, error: s
             notif.last_error = error
             session.commit()
 
+def _has_pending_duplicate(notification_type: str, payload: dict, chat_id: int, exclude_id: int) -> bool:
+    key = _get_dedup_key(notification_type, payload, chat_id)
+    if key is None:
+        return False
+    with get_session() as session:
+        candidates = session.query(PendingNotification).filter(
+            PendingNotification.notification_type == notification_type,
+            PendingNotification.chat_id == chat_id,
+            PendingNotification.status == 'pending',
+            PendingNotification.id != exclude_id,
+            PendingNotification.retry_count < PendingNotification.max_retries
+        ).all()
+        for notif in candidates:
+            try:
+                pl = json.loads(notif.payload_json)
+                if _get_dedup_key(notification_type, pl, chat_id) == key:
+                    return True
+            except Exception:
+                continue
+    return False
+
+
 # ---------------------------------------------------------------------
 # Safe send helpers
 # ---------------------------------------------------------------------
@@ -301,7 +349,7 @@ async def _safe_send_document(bot: Bot, chat_id: int, timeout: float = _REPORT_S
 # ---------------------------------------------------------------------
 async def _dispatch_notification(bot: Bot, nt: str, chat_id: int, payload: dict, notif_id: int):
     if nt in ('order_notification', 'despatch_confirmation', 'despatch_notification', 'admin_copy',
-              'unusual_alert', 'generic_message'):
+              'unusual_alert', 'generic_message', 'sale_cancellation', 'purchase_notification'):
         await _send_generic_message(bot, chat_id, payload)
 
     elif nt == 'daily_sales_report':

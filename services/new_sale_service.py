@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import logging
-from sys import flags
 from unittest import result
 from sqlalchemy import func, case, or_
 from sqlalchemy.orm import joinedload
@@ -89,13 +88,11 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 is_credit = False
                 if payment_type.lower() == PaymentStatusEnum.CREDIT:
                     is_credit = True
-                    # total_amount += labour_expense
-                
 
                 sale = ProfessionalSale(
                     customer_id=customer_id,
                     total_amount=total_amount,
-                    is_credit_sale = is_credit,
+                    is_credit_sale=is_credit,
                     labour_expense=labour_expense,
                     user_id=user_id,
                     delivery_name=delivery_name,
@@ -104,18 +101,17 @@ class NewSaleService(BaseService[ProfessionalSale]):
                     delivery_Plate=delivery_plate
                 )
                 if sale_date:
-                    # Convert to datetime if it's a date object
                     if isinstance(sale_date, date) and not isinstance(sale_date, datetime):
                         now = datetime.now()
                         sale_date = datetime.combine(sale_date, now.time())
                     sale.created_at = sale_date
-                    # Also update last_modified to match
                     sale.last_modified = sale_date
                 session.add(sale)
                 session.flush()
 
                 for item in sale_items:
                     amount = item['quantity'] * item['dozen'] * item['unit_price']
+                    is_despatch = item.get('for_despatch', False)  # FIX #1: default False
                     sale_item = {
                         'sale_id': sale.id,
                         'batch_id': item['batch_id'],
@@ -123,25 +119,24 @@ class NewSaleService(BaseService[ProfessionalSale]):
                         'quantity': item['quantity'],
                         'dozen': item['dozen'],
                         'total': amount,
-                        'for_despatch': item['for_despatch'],
+                        'for_despatch': is_despatch,
                         'created_at': sale_date,
-                        'last_modified': sale_date
+                        'last_modified': sale_date,
+                        'despatched_at': sale_date if is_despatch else None,  # FIX #4: audit trail
                     }
                     self.sale_item_service.create_with_session(session, sale_item)
-
 
                     batch_transaction = {
                         'batch_id': item['batch_id'],
                         'quantity': item['quantity'],
                         'transaction_type': TransactionType.SALE,
-                        'reference_number': str(sale.id), 
+                        'reference_number': str(sale.id),
                         'notes': f"Sale #{sale.id}",
                         'user_id': user_id,
                         'created_at': sale_date,
                         'last_modified': sale_date
                     }
                     self.new_batch_transaction_service.create_with_session(session, batch_transaction)
-
 
                     batch = session.query(ProductBatch).get(item['batch_id'])
                     if batch:
@@ -151,14 +146,13 @@ class NewSaleService(BaseService[ProfessionalSale]):
                             raise ValueError(
                                 f"Batch {batch.id} went negative while saving sale #{sale.id}; requested {qty_sold}, available before sale was {batch.available_quantity + qty_sold}"
                             )
-                        # Update product totals if needed
                         if batch.product:
                             batch.product.update_totals()
-                
+
                 due_date = None
                 if is_credit and credit_term_days is not None:
                     base_date = sale_date.date() if isinstance(sale_date, datetime) else sale_date
-                    due_date = base_date + timedelta(days=credit_term_days) # type: ignore
+                    due_date = base_date + timedelta(days=credit_term_days)
 
                 sale_payment_term_data = {
                     'sale_id': sale.id,
@@ -180,10 +174,20 @@ class NewSaleService(BaseService[ProfessionalSale]):
                             payment['amount'],
                             payment['bank_account_id'],
                             user_id,
-                            payment_date=sale_date.date()
+                            payment_date=sale_date.date() if sale_date else date.today()
                         )
                     session.refresh(sale_payment_term)
-                
+
+                # FIX #1: default changed to False so missing key does NOT count as despatched
+                if all(item.get('for_despatch', False) for item in sale_items):
+                    if sale_date:
+                        if isinstance(sale_date, datetime):
+                            sale.despatch_date = sale_date.date()
+                        else:
+                            sale.despatch_date = sale_date
+                    else:
+                        sale.despatch_date = date.today()
+
                 session.commit()
                 return sale, None
             except Exception as e:
@@ -255,14 +259,13 @@ class NewSaleService(BaseService[ProfessionalSale]):
         now_local = datetime.now()
         now_utc = datetime.utcnow()
         offset = now_local - now_utc
-
         start_local = datetime.combine(target_date, time.min)
         end_local = datetime.combine(target_date, time.max)
-
         start_utc = start_local - offset
         end_utc = end_local - offset
 
         with get_session() as session:
+            # Sales created on this date – used for "sales made" metrics
             sales = (
                 session.query(ProfessionalSale)
                 .options(
@@ -279,17 +282,14 @@ class NewSaleService(BaseService[ProfessionalSale]):
             )
 
             total_sales_amount = 0.0
-            total_labour_expense = 0.0
-            total_invoiced_full = 0.0 
+            total_invoiced_full = 0.0
             payment_totals = {}
             details = []
 
             for sale in sales:
                 total_sales_amount += sale.total_amount
-                total_labour_expense += sale.labour_expense
 
-                # Full amount from the payment term (already correct for both paid and credit)
-                full_total = sale.total_amount   # fallback
+                full_total = sale.total_amount
                 if sale.payment_terms:
                     full_total = sale.payment_terms[0].total_amount
                 total_invoiced_full += full_total
@@ -323,6 +323,7 @@ class NewSaleService(BaseService[ProfessionalSale]):
                             'delivery_phone': sale.delivery_phone or "",
                             'delivery_plate': sale.delivery_Plate or "",
                         })
+
                     if not term_has_payment_today and payment_term.payment_status in [
                         PaymentStatusEnum.CREDIT.value,
                         PaymentStatusEnum.PARTIAL.value
@@ -332,7 +333,7 @@ class NewSaleService(BaseService[ProfessionalSale]):
                             'customer_name': sale.customer.name if sale.customer else "N/A",
                             'total_amount': sale.total_amount,
                             'labour_expense': sale.labour_expense,
-                            'full_total': full_total, 
+                            'full_total': full_total,
                             'payment_type': payment_term.payment_status.capitalize(),
                             'payment_amount': sale.total_amount,
                             'delivery_name': sale.delivery_name or "",
@@ -340,10 +341,18 @@ class NewSaleService(BaseService[ProfessionalSale]):
                             'delivery_phone': sale.delivery_phone or "",
                             'delivery_plate': sale.delivery_Plate or "",
                         })
-            
+
             cash_account_id = self.cash_account_id
             cash_total = payment_totals.get(cash_account_id, 0.0) if cash_account_id else 0.0
             bank_total = sum(amt for acc, amt in payment_totals.items() if acc != cash_account_id)
+
+            # 🔥 Labour expense keyed off despatch_date, not created_at.
+            total_labour_expense = session.query(
+                func.sum(ProfessionalSale.labour_expense)
+            ).filter(
+                ProfessionalSale.despatch_date == target_date,
+                ProfessionalSale.is_deleted == False
+            ).scalar() or 0.0
 
             return {
                 'date': target_date,
@@ -377,7 +386,7 @@ class NewSaleService(BaseService[ProfessionalSale]):
                     .joinedload(PaymentTransaction.bank_account)
                 )
                 .filter(
-                    ProfessionalSale.created_at.between(start_utc, end_utc),
+                    ProfessionalSale.despatch_date == target_date,
                     ProfessionalSale.labour_expense > 0,
                     ProfessionalSale.is_deleted == False
                 )
@@ -533,7 +542,7 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 logger.error(f"Error loading sale with items {sale_id}: {e}")
                 return None
     
-    def delete_sale_cascade(self, sale_id: int, user_id: int = None) -> bool:
+    def delete_sale_cascade(self, sale_id: int, user_id: int = None, send_notification: bool = True) -> bool:
         with get_session() as session:
             try:
                 sale = session.query(ProfessionalSale).options(
@@ -603,7 +612,8 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 logger.info(f"Successfully deleted sale {sale_id} with cascade")
                 
                 self._refresh_json_cache_from_db()
-                self._send_cancellation_notification(sale_data)
+                if send_notification:
+                    self._send_cancellation_notification(sale_data)
                 
                 return True
 
@@ -670,7 +680,11 @@ class NewSaleService(BaseService[ProfessionalSale]):
             if items_text_am:
                 message += f"\n<b>እቃዎች:</b>\n{items_text_am}"
             
-            notify_store_team_sync(message)
+            notify_store_team_sync(
+                message,
+                sale_id=sale_data['sale_id'],
+                notification_type='sale_cancellation'
+            )
             logger.info(f"Cancellation notification sent for sale #{sale_data['sale_id']}")
             
         except Exception as e:
@@ -792,24 +806,35 @@ class NewSaleService(BaseService[ProfessionalSale]):
     
     def get_credit_sales_by_customer(self) -> list:
         """
-        Rerurn list of customers with therir aggregate credit sales data (total credit, total paid, total unpaid).
+        Return customers with aggregate credit sales data.
+        Includes ALL credit sales, even fully paid ones.
         """
+        from models.sale_payment_term import SalePaymentTerm, PaymentStatusEnum
+        from sqlalchemy import or_, func
+        from sqlalchemy.orm import joinedload
+        from datetime import date
+
         with get_session() as session:
+            # Include all credit sales (remaining may be 0)
             sales = session.query(ProfessionalSale).options(
                 joinedload(ProfessionalSale.customer),
                 joinedload(ProfessionalSale.payment_terms)
+            ).join(
+                SalePaymentTerm, ProfessionalSale.id == SalePaymentTerm.sale_id
             ).filter(
                 ProfessionalSale.is_deleted == False,
+                SalePaymentTerm.is_deleted == False,
                 or_(
                     ProfessionalSale.is_credit_sale == True,
-                    ProfessionalSale.payment_terms.any(
-                        SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL])
+                    SalePaymentTerm.payment_status.in_(
+                        [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]
                     )
                 )
-            ).all()
+            ).distinct().all()
 
             customer_data = {}
             for sale in sales:
+                # Find the relevant payment term (CREDIT or PARTIAL)
                 term = None
                 for pt in sale.payment_terms:
                     if pt.payment_status in [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]:
@@ -820,9 +845,12 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 if not term:
                     continue
 
+                remaining_for_term = term.total_amount - term.paid_amount
+
                 cust_id = sale.customer_id
                 name = sale.customer.name if sale.customer else "N/A"
                 phone = sale.customer.phone if sale.customer else ""
+
                 if cust_id not in customer_data:
                     customer_data[cust_id] = {
                         'customer_id': cust_id,
@@ -833,26 +861,29 @@ class NewSaleService(BaseService[ProfessionalSale]):
                         'remaining': 0.0,
                         'sale_ids': [],
                         'payment_term_ids': [],
-                        'earliest_due_date': None,      # NEW
-                        'has_short_term': False         # NEW
+                        'earliest_due_date': None,
+                        'has_short_term': False
                     }
-                
+
                 customer_data[cust_id]['total_amount'] += term.total_amount
                 customer_data[cust_id]['paid_amount'] += term.paid_amount
-                remaining_for_term = term.total_amount - term.paid_amount
                 customer_data[cust_id]['remaining'] += remaining_for_term
                 customer_data[cust_id]['sale_ids'].append(sale.id)
                 customer_data[cust_id]['payment_term_ids'].append(term.id)
 
-                if remaining_for_term > 0 and term.due_date:
-                    if customer_data[cust_id]['earliest_due_date'] is None or term.due_date < customer_data[cust_id]['earliest_due_date']:
+                # Earliest due date and short‑term flag
+                if term.due_date:
+                    if (customer_data[cust_id]['earliest_due_date'] is None or
+                        term.due_date < customer_data[cust_id]['earliest_due_date']):
                         customer_data[cust_id]['earliest_due_date'] = term.due_date
 
                     sale_date = sale.created_at.date() if sale.created_at else None
                     today = date.today()
-                    if sale_date and term.due_date == sale_date and term.due_date == today:
+                    if (sale_date and term.due_date == sale_date and
+                        term.due_date == today and remaining_for_term > 0):
                         customer_data[cust_id]['has_short_term'] = True
-            
+
+            # Build result with statuses
             result = list(customer_data.values())
             for r in result:
                 if r['remaining'] == 0:
@@ -861,7 +892,7 @@ class NewSaleService(BaseService[ProfessionalSale]):
                     r['status'] = 'Partial'
                 else:
                     r['status'] = 'Unpaid'
-            
+
             result.sort(key=lambda x: x['customer_name'])
             return result
     
@@ -1715,3 +1746,130 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 session.rollback()
                 logger.error(f"Error deleting payment group: {e}", exc_info=True)
                 return False
+    
+    def get_credit_customers_paginated(
+        self,
+        page: int = 1,
+        page_size: int = 50,
+        short_term_only: bool = False,
+        search: str = ""
+    ) -> Tuple[List[Dict], int]:
+        from models.sale_payment_term import SalePaymentTerm, PaymentStatusEnum
+        from models.customers import Customer
+        from sqlalchemy import func, or_, and_, case, cast, String
+        from datetime import date
+
+        with get_session() as session:
+            # Base query with joins – include customer name and phone
+            query = session.query(
+                ProfessionalSale.customer_id,
+                func.sum(SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount).label('total_remaining'),
+                func.sum(SalePaymentTerm.total_amount).label('total_amount'),
+                func.sum(SalePaymentTerm.paid_amount).label('paid_amount'),
+                func.min(SalePaymentTerm.due_date).label('earliest_due_date'),
+                func.max(
+                    case(
+                        (
+                            and_(
+                                SalePaymentTerm.due_date == func.date(ProfessionalSale.created_at),
+                                SalePaymentTerm.due_date == date.today(),
+                                (SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount) > 0
+                            ),
+                            1
+                        ),
+                        else_=0
+                    )
+                ).label('has_short_term'),
+                Customer.name.label('customer_name'),
+                Customer.phone.label('customer_phone')   # <-- added phone
+            ).join(
+                SalePaymentTerm, ProfessionalSale.id == SalePaymentTerm.sale_id
+            ).join(
+                Customer, ProfessionalSale.customer_id == Customer.id
+            ).filter(
+                ProfessionalSale.is_deleted == False,
+                SalePaymentTerm.is_deleted == False,
+                Customer.is_deleted == False,
+                or_(
+                    ProfessionalSale.is_credit_sale == True,
+                    SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL])
+                )
+            ).group_by(
+                ProfessionalSale.customer_id,
+                Customer.name,
+                Customer.phone   # <-- added phone to group_by
+            )
+
+            # Short‑term only
+            if short_term_only:
+                query = query.having(
+                    case(
+                        (
+                            and_(
+                                SalePaymentTerm.due_date == func.date(ProfessionalSale.created_at),
+                                SalePaymentTerm.due_date == date.today(),
+                                (SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount) > 0
+                            ),
+                            1
+                        ),
+                        else_=0
+                    ) == 1
+                )
+
+            # Apply search if provided
+            if search:
+                search_lower = f"%{search.lower()}%"
+                query = query.having(
+                    or_(
+                        func.lower(Customer.name).like(search_lower),
+                        func.lower(cast(func.sum(SalePaymentTerm.total_amount), String)).like(search_lower),
+                        func.lower(cast(func.sum(SalePaymentTerm.paid_amount), String)).like(search_lower),
+                        func.lower(cast(func.sum(SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount), String)).like(search_lower)
+                    )
+                )
+
+            # Total count
+            total = query.count()
+
+            # Ordering: unpaid first (total_remaining > 0), then by remaining descending
+            order_priority = case(
+                (func.sum(SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount) > 0, 0),
+                else_=1
+            )
+            rows = query.order_by(
+                order_priority,
+                func.sum(SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount).desc()
+            ).offset((page - 1) * page_size).limit(page_size).all()
+
+            if not rows:
+                return [], 0
+
+            # Build result list
+            result = []
+            for row in rows:
+                remaining = row.total_remaining
+                paid = row.paid_amount
+                total_amt = row.total_amount
+
+                if remaining == 0:
+                    status = 'Paid'
+                elif paid > 0:
+                    status = 'Partial'
+                else:
+                    status = 'Unpaid'
+
+                result.append({
+                    'customer_id': row.customer_id,
+                    'customer_name': row.customer_name,
+                    'customer_phone': row.customer_phone or "",   # now available
+                    'total_amount': float(total_amt),
+                    'paid_amount': float(paid),
+                    'remaining': float(remaining),
+                    'status': status,
+                    'earliest_due_date': row.earliest_due_date,
+                    'has_short_term': bool(row.has_short_term),
+                    'sale_ids': [],
+                    'payment_term_ids': []
+                })
+
+            return result, total

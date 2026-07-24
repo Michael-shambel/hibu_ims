@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import sys
-from wsgiref import headers
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QPushButton, QWidget, QLabel, QMessageBox, QScrollArea, QTabWidget,
@@ -1739,6 +1738,7 @@ class DespatchSalesDialog(QDialog):
 
     def open_items_with_mark(self, sale):
         """Custom dialog that shows sale items with a 'Mark Despatched' button per item."""
+        from datetime import date
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Sale #{sale.id} Items - Mark Despatched")
         dialog.setMinimumSize(1000, 500)
@@ -1863,34 +1863,52 @@ class DespatchSalesDialog(QDialog):
 
         layout.addWidget(table)
 
-        # Connect Mark All button
         def on_mark_all():
             extra_text = note_edit.text().strip()
             self.extra_despatch_note = extra_text
 
-            # --- NEW: Update the sale's delivery_name in the database ---
+            # Update delivery name if note provided
             if extra_text:
                 from services.new_sale_service import NewSaleService
                 sale_service = NewSaleService()
-                
-                # Get current delivery name (or empty string)
                 current_delivery = sale.delivery_name or ""
-                # Append the note (in parentheses)
                 new_delivery = f"{current_delivery} ({extra_text})"
-                
-                # Update the database
                 sale_service.update(sale.id, {'delivery_name': new_delivery})
-                
-                # Update the local sale object so the notification uses the combined address
                 sale.delivery_name = new_delivery
-            # ----------------------------------------------------------
 
-            # Now mark all items as despatched
-            for r, it in enumerate(items):
-                if not it.for_despatch:
-                    self.mark_item_and_refresh(it.id, table, r, sale, show_message=False)
-            
-            QMessageBox.information(dialog, "Marked", "All items marked as despatched (where applicable).")
+            # Fetch pending items directly from database
+            from services.new_sale_item_service import NewSaleItemService
+            item_service = NewSaleItemService()
+            pending_items = item_service.get_pending_items_for_sale(sale.id)
+
+            if not pending_items:
+                QMessageBox.information(dialog, "Info", "No pending items to mark.")
+                return
+
+            # Mark each pending item
+            marked = 0
+            for item in pending_items:
+                if item_service.mark_item_despatched(item.id):
+                    marked += 1
+
+            # After marking, check if fully despatched and send notification
+            # NOTE: The service already handles setting despatch_date atomically.
+            # We only need to check and send notification.
+            if marked == len(pending_items):
+                from services.new_sale_service import NewSaleService
+                full_sale = NewSaleService().get_sale_with_items(sale.id)
+                if full_sale:
+                    all_despatched = all(it.for_despatch for it in full_sale.items if not it.is_deleted)
+                    if all_despatched:
+                        self._send_despatch_notification(full_sale, self.extra_despatch_note)
+
+            if marked == len(pending_items):
+                QMessageBox.information(dialog, "Success", f"All {marked} item(s) marked as despatched.")
+            else:
+                QMessageBox.warning(dialog, "Partial", f"Marked {marked} out of {len(pending_items)} items.")
+
+            # Close the dialog so that the table refreshes when reopened
+            dialog.accept()
 
         mark_all_btn.clicked.connect(on_mark_all)
 
@@ -2016,8 +2034,8 @@ class DespatchSalesDialog(QDialog):
             logger.error(f"Failed to send despatch notification: {e}")
 
 class CustomerSalesListDialog(QDialog):
-    """Displays credit sales for a customer, grouped by date."""
-    def __init__(self, parent, customer_name, sale_ids, current_user):
+    """Displays credit sales for a customer, grouped by date, using customer_id."""
+    def __init__(self, parent, customer_name, sale_ids=None, current_user=None, customer_id=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.setWindowTitle(f"Credit Sales - {customer_name}")
@@ -2031,17 +2049,28 @@ class CustomerSalesListDialog(QDialog):
             Qt.CustomizeWindowHint
         )
         self.customer_name = customer_name
-        self.sale_ids = sale_ids
+        self.customer_id = customer_id
+        self.sale_ids = sale_ids or []   # kept for compatibility, but we'll use customer_id
         self.current_user = current_user
         self.grouped_data = []          # list of dicts per date group
+        self.thread = None
+        self.worker = None
+        self.is_loading = False
+
         self.init_ui()
         self.setMinimumSize(0, 0)
         self.setMaximumSize(16777215, 16777215)
         screen_geometry = QApplication.primaryScreen().availableGeometry()
         self.setGeometry(screen_geometry)
-        self.load_data()
-        self.thread = None
-        self.worker = None
+
+        # If we have a customer_id, fetch data; otherwise try using sale_ids (legacy)
+        if self.customer_id:
+            self.load_data_from_customer()
+        elif self.sale_ids:
+            self.load_data_from_ids()
+        else:
+            QMessageBox.warning(self, "No Data", "No customer or sale IDs provided.")
+            self.accept()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -2055,16 +2084,13 @@ class CustomerSalesListDialog(QDialog):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         for col in (1, 2, 3):
-            # header.setSectionResizeMode(col, QHeaderView.Stretch)
             self.table.setColumnWidth(col, 140)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.table.setColumnWidth(4, 120)
         header.setSectionResizeMode(5, QHeaderView.Fixed)
-        self.table.setColumnWidth(5, 140)  # wider for larger button
+        self.table.setColumnWidth(5, 140)
 
         self.table.setAlternatingRowColors(True)
-
-        # === ELDERLY-FRIENDLY: large bold font, tall rows ===
         self.table.setFont(QFont("Segoe UI", 13, QFont.Bold))
         self.table.verticalHeader().setDefaultSectionSize(55)
 
@@ -2094,7 +2120,6 @@ class CustomerSalesListDialog(QDialog):
 
         layout.addWidget(self.table, 1)
 
-        # Close button - larger
         btn_close = QPushButton("Close")
         btn_close.setFixedSize(120, 45)
         btn_close.setStyleSheet("""
@@ -2106,29 +2131,64 @@ class CustomerSalesListDialog(QDialog):
                 font-weight: bold;
                 font-size: 14px;
             }
-            QPushButton:hover {
-                background-color: #d5d5d5;
-            }
+            QPushButton:hover { background-color: #d5d5d5; }
         """)
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close, alignment=Qt.AlignRight)
 
-    def _to_ethiopian_date_str(self, dt):
-        if not dt:
-            return ""
-        try:
-            from ui.components.ethiopian_date import EthiopianDateConverter
-            eth_year, eth_month, eth_day = EthiopianDateConverter.to_ethiopian(dt)
-            return f"{eth_day:02d}/{eth_month:02d}/{eth_year:04d}"
-        except Exception:
-            return dt.strftime("%Y-%m-%d")
+        # Loading indicator
+        self.loading_label = QLabel("Loading credit sales data, please wait...")
+        self.loading_label.setAlignment(Qt.AlignCenter)
+        self.loading_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        self.loading_label.hide()
+        layout.addWidget(self.loading_label)
 
-    def load_data(self):
+    # ---------- Data loading from customer_id ----------
+    def load_data_from_customer(self):
+        """Fetch grouped credit sales for the customer via service."""
+        if self.is_loading:
+            return
+        self.is_loading = True
+        self.loading_label.show()
+        self.table.hide()
+
+        self.thread = QThread()
+        self.worker = Worker(self._fetch_customer_data)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self._on_customer_data_loaded)
+        self.worker.error.connect(self._on_error)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.start()
+
+    def _fetch_customer_data(self):
+        from services.new_sale_service import NewSaleService
+        service = NewSaleService()
+        return service.get_customer_credit_sales_grouped(self.customer_id)
+
+    def _on_customer_data_loaded(self, grouped_data):
+        self.grouped_data = grouped_data
+        self.populate_table()
+        self.loading_label.hide()
+        self.table.show()
+        self.is_loading = False
+
+    def _on_error(self, error):
+        self.loading_label.setText(f"Error loading data: {error}")
+        QMessageBox.critical(self, "Error", f"Failed to load credit sales:\n{error}")
+        self.loading_label.hide()
+        self.table.show()
+        self.is_loading = False
+
+    # ---------- Legacy loading from sale_ids (kept for compatibility) ----------
+    def load_data_from_ids(self):
+        """Legacy: load from sale_ids list (now deprecated)."""
         from services.new_sale_service import NewSaleService
         service = NewSaleService()
         sales = service.get_credit_sales_by_ids(self.sale_ids)
 
-        # Group by sale_date (date part)
         date_groups = {}
         for sale in sales:
             date_key = sale['sale_date'].date() if sale['sale_date'] else None
@@ -2146,7 +2206,6 @@ class CustomerSalesListDialog(QDialog):
             date_groups[date_key]['sale_ids'].append(sale['sale_id'])
             date_groups[date_key]['payment_term_ids'].append(sale['payment_term_id'])
 
-        # Convert to list, sort by date (newest first)
         self.grouped_data = []
         for date_key, data in date_groups.items():
             if data['remaining'] <= 0:
@@ -2155,7 +2214,6 @@ class CustomerSalesListDialog(QDialog):
                 status = 'Partial'
             else:
                 status = 'Unpaid'
-
             self.grouped_data.append({
                 'sale_date': date_key,
                 'total_amount': data['total_amount'],
@@ -2165,13 +2223,10 @@ class CustomerSalesListDialog(QDialog):
                 'sale_ids': data['sale_ids'],
                 'payment_term_ids': data['payment_term_ids'],
             })
-
-        # Sort: newest first
-        self.grouped_data.sort(key=lambda x: x['sale_date'], reverse=True)
-        self.grouped_data.sort(key=lambda x: x['sale_date'], reverse=True)
-
+        self.grouped_data.sort(key=lambda x: x['sale_date'] or date.min, reverse=True)
         self.populate_table()
 
+    # ---------- Table population ----------
     def populate_table(self):
         self.table.setRowCount(len(self.grouped_data))
         for row, group in enumerate(self.grouped_data):
@@ -2211,7 +2266,7 @@ class CustomerSalesListDialog(QDialog):
                 status_item.setForeground(QColor("#e74c3c"))
             self.table.setItem(row, 4, status_item)
 
-            # View Items button - larger
+            # View Items button
             view_btn = QPushButton("View Items")
             view_btn.setFixedSize(110, 40)
             view_btn.setStyleSheet("""
@@ -2223,15 +2278,38 @@ class CustomerSalesListDialog(QDialog):
                     font-weight: bold;
                     font-size: 13px;
                 }
-                QPushButton:hover {
-                    background-color: #2980b9;
-                }
+                QPushButton:hover { background-color: #2980b9; }
             """)
-            view_btn.clicked.connect(lambda checked, ids=group['sale_ids'], date_obj=group['sale_date']: self.view_items(ids, date_obj))
+            # For grouped data, we may have sale_ids or we can use the group's 'items'
+            # But we want to show all items for that date group. We can either:
+            # - pass sale_ids and fetch items again, or
+            # - we can store items in the group (already present from get_customer_credit_sales_grouped)
+            # For the new method, the group includes an 'items' list.
+            # For legacy, we need to fetch items from sale_ids.
+            # We'll handle both.
+            if 'items' in group:
+                # new data from get_customer_credit_sales_grouped
+                view_btn.clicked.connect(lambda checked, items=group['items']: self.view_items_from_list(items))
+            else:
+                # legacy: fetch items from sale_ids
+                view_btn.clicked.connect(lambda checked, ids=group['sale_ids']: self.view_items_from_ids(ids))
             self.table.setCellWidget(row, 5, view_btn)
 
-    def view_items(self, sale_ids, date_obj):
-        """Show all items from all sales in this group, with a total row."""
+    def view_items_from_list(self, items):
+        """Show items from a list (already aggregated)."""
+        if not items:
+            QMessageBox.information(self, "No Items", "No items found for this date.")
+            return
+        dialog = AggregatedSaleItemsDialog(
+            self,
+            f"Items for {self.customer_name} on {self.grouped_data[0]['sale_date']}",
+            items,
+            self.current_user
+        )
+        dialog.exec()
+
+    def view_items_from_ids(self, sale_ids):
+        """Fetch and show items from sale_ids (legacy)."""
         from services.new_sale_service import NewSaleService
         service = NewSaleService()
         all_items = []
@@ -2239,7 +2317,6 @@ class CustomerSalesListDialog(QDialog):
             sale = service.get_sale_with_items(sid)
             if sale and sale.items:
                 for item in sale.items:
-                    # Convert to dict for easy display
                     product_name = item.batch.product.name if item.batch and item.batch.product else "N/A"
                     all_items.append({
                         'product_name': product_name,
@@ -2249,21 +2326,28 @@ class CustomerSalesListDialog(QDialog):
                         'total': item.total,
                         'for_despatch': item.for_despatch,
                     })
-
         if not all_items:
             QMessageBox.information(self, "No Items", "No items found for these sales.")
             return
-
-        # Open dialog with aggregated items
-        date_str = self._to_ethiopian_date_str(date_obj) if date_obj else "Unknown Date"
         dialog = AggregatedSaleItemsDialog(
             self,
-            f"Items for {self.customer_name} on {date_str}",
+            f"Items for {self.customer_name}",
             all_items,
             self.current_user
         )
         dialog.exec()
-    
+
+    # ---------- Helpers ----------
+    def _to_ethiopian_date_str(self, dt):
+        if not dt:
+            return ""
+        try:
+            from ui.components.ethiopian_date import EthiopianDateConverter
+            eth_year, eth_month, eth_day = EthiopianDateConverter.to_ethiopian(dt)
+            return f"{eth_day:02d}/{eth_month:02d}/{eth_year:04d}"
+        except Exception:
+            return dt.strftime("%Y-%m-%d")
+
     def closeEvent(self, event):
         if hasattr(self, 'thread') and self.thread is not None and self.thread.isRunning():
             self.thread.quit()
@@ -3636,14 +3720,28 @@ class ProfitDialog(QDialog):
         # ---- Asset snapshot ----
         from services.bank_account_service import BankAccountService
         from services.new_product_service import NewProductService
+        from services.cash_loan_service import CashLoanService
 
         bank_service = BankAccountService()
         product_service = NewProductService()
 
         cash = bank_service.get_total_balance_all_accounts()
         inventory = product_service.get_total_inventory_value()
-        receivables = self.sale_service.get_credit_sales_summary()['total_unpaid']
-        payables = self.purchase_service.get_credit_purchases_summary()['total_unpaid']
+        
+        # ---- Original credit sales/purchases ----
+        sales_unpaid = self.sale_service.get_credit_sales_summary()['total_unpaid']
+        purchases_unpaid = self.purchase_service.get_credit_purchases_summary()['total_unpaid']
+
+        # ---- ADD LOAN TOTALS ----
+        loan_service = CashLoanService()
+        loan_summary = loan_service.get_cash_loan_summary()
+        loan_receivable = loan_summary['total_receivable']   # loans given by shop
+        loan_payable = loan_summary['total_payable']         # loans received by shop
+
+        # Combine
+        receivables = sales_unpaid + loan_receivable
+        payables = purchases_unpaid + loan_payable
+
 
         # ---- This Year (Ethiopian year to date) ----
         year_start_greg = self._ethiopian_month_start(eth_year, 1)   # Meskerem 1

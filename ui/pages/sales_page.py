@@ -919,9 +919,16 @@ class SalesManager(QWidget):
         self.admin_detail_checkbox.setChecked(False)
         self.admin_detail_checkbox.setToolTip("Send detailed product list to admin after saving")
 
+        # NEW: Send Telegram checkbox
+        self.send_telegram_checkbox = QCheckBox("Send Txt")
+        self.send_telegram_checkbox.setFont(QFont("Segoe UI", 10))
+        self.send_telegram_checkbox.setChecked(True)   # default on
+        self.send_telegram_checkbox.setToolTip("Uncheck to prevent sending order notification to store team")
+
         mode_layout.addWidget(self.cash_radio)
         mode_layout.addWidget(self.credit_radio)
         mode_layout.addWidget(self.admin_detail_checkbox)
+        mode_layout.addWidget(self.send_telegram_checkbox)
         mode_layout.addStretch()
 
         right_layout.addWidget(mode_widget)
@@ -1494,7 +1501,7 @@ class SalesManager(QWidget):
         row = self.payments_table.rowCount()
         self.payments_table.insertRow(row)
 
-        # amount_edit = SelectAllLineEdit()
+        # ----- Amount column -----
         amount_edit = NumberLineEdit()
         amount_edit.setPlaceholderText("0.00")
         amount_edit.setAlignment(Qt.AlignRight)
@@ -1510,7 +1517,7 @@ class SalesManager(QWidget):
         amount_edit.editingFinished.connect(self.auto_fill_remaining_payment)
         self.payments_table.setCellWidget(row, 0, amount_edit)
 
-
+        # ----- Bank account column -----
         bank_combo = QComboBox()
         bank_combo.setFont(QFont("Segoe UI", 14, QFont.Bold))
         bank_combo.setStyleSheet("""
@@ -1525,42 +1532,54 @@ class SalesManager(QWidget):
         """)
         bank_combo.addItem("Select Bank", None)
         accounts = self.bank_account_service.get_all()  # or get_active()
-        
-        # Priority order: 3, 6, 5, 1, 2 – then all others at the end
+
+        # Priority order: 14, 17, 16, 15, 12, 13
         priority_ids = [14, 17, 16, 15, 12, 13]
-        # Build a dict for quick lookup: id -> account object
         account_map = {acc.id: acc for acc in accounts}
-        
-        # Priority accounts (in the exact order, only those that exist)
+
+        # Add priority accounts in exact order (only those that exist)
         for pid in priority_ids:
             if pid in account_map:
-                acc = account_map.pop(pid)   # remove from map so it won't appear later
+                acc = account_map.pop(pid)
                 display = f"{acc.bank_name} - {acc.account_name}"
                 if acc.account_number:
                     display += f" ({acc.account_number})"
                 bank_combo.addItem(display, acc.id)
-        
-        # Remaining accounts (any order, but they go at the very end)
-        for acc in account_map.values():   # account_map now contains only non-priority accounts
+
+        # Add remaining accounts (non‑priority) at the end
+        for acc in account_map.values():
             display = f"{acc.bank_name} - {acc.account_name}"
             if acc.account_number:
                 display += f" ({acc.account_number})"
             bank_combo.addItem(display, acc.id)
 
-        # Default selection: pick account with ID 3 if it exists, otherwise keep "Select Bank"
-        if 14 in [a.id for a in accounts]:               # exists at all
-            idx = bank_combo.findData(14)
-            if idx >= 0:
-                bank_combo.setCurrentIndex(idx)
-        elif bank_account_id:                            # fallback if 3 not found and a specific id was given
+        # ---------- FIXED SELECTION LOGIC ----------
+        if bank_account_id is not None:
+            # Try to select the given bank account ID
             idx = bank_combo.findData(bank_account_id)
             if idx >= 0:
                 bank_combo.setCurrentIndex(idx)
+            else:
+                # Fallback to default priority account 14 if available
+                idx = bank_combo.findData(14)
+                if idx >= 0:
+                    bank_combo.setCurrentIndex(idx)
+                else:
+                    # If 14 not present, keep "Select Bank" (index 0)
+                    bank_combo.setCurrentIndex(0)
+        else:
+            # No specific ID – use default priority account 14 if it exists
+            idx = bank_combo.findData(14)
+            if idx >= 0:
+                bank_combo.setCurrentIndex(idx)
+            else:
+                bank_combo.setCurrentIndex(0)
+        # ------------------------------------------
 
         bank_combo.currentIndexChanged.connect(lambda idx, r=row: self.on_payment_bank_changed(r, idx))
         self.payments_table.setCellWidget(row, 1, bank_combo)
-    
 
+        # ----- Delete button -----
         delete_btn = QPushButton("✕")
         delete_btn.setFixedSize(30, 30)
         delete_btn.setCursor(Qt.PointingHandCursor)
@@ -1578,14 +1597,12 @@ class SalesManager(QWidget):
             }
         """)
         delete_btn.clicked.connect(lambda checked, r=row: self.remove_payment_row(r))
-        # Wrap in widget for centering
         btn_widget = QWidget()
         btn_layout = QHBoxLayout(btn_widget)
         btn_layout.addWidget(delete_btn)
         btn_layout.setAlignment(Qt.AlignCenter)
-        btn_layout.setContentsMargins(0,0,0,0)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
         self.payments_table.setCellWidget(row, 2, btn_widget)
-
 
         self.update_payment_summary()
 
@@ -2366,6 +2383,7 @@ class SalesManager(QWidget):
             self.sale_date_edit.setDate(current_qdate)
             self.sale_date_edit.blockSignals(False)
             self.editing_sale_id = None
+            self.send_telegram_checkbox.setChecked(True)
     
     def new_sale(self):
         self.editing_sale_id = None
@@ -2378,7 +2396,8 @@ class SalesManager(QWidget):
         self.cash_radio.setChecked(True)
         self.delivery_name.clear()
         self.same_day_message_input.clear()
-        self.admin_detail_checkbox.setChecked(False) 
+        self.admin_detail_checkbox.setChecked(False)
+        self.send_telegram_checkbox.setChecked(True)
 
         current_qdate = QDate.currentDate()
         if self.temp_sale_date and self.temp_date_timestamp:
@@ -2454,6 +2473,7 @@ class SalesManager(QWidget):
 
         try:
             # Common validations
+            send_telegram = self.send_telegram_checkbox.isChecked()
             customer_id = self.customer_combo.currentData()
             if not customer_id:
                 QMessageBox.warning(self, "Validation", "Please select a customer!")
@@ -2493,7 +2513,7 @@ class SalesManager(QWidget):
                 if reply == QMessageBox.No:
                     return
                 original_sale_id = self.editing_sale_id
-                if not self.sale_service.delete_sale_cascade(self.editing_sale_id, user_id):
+                if not self.sale_service.delete_sale_cascade(self.editing_sale_id, user_id, send_notification=send_telegram):
                     QMessageBox.critical(self, "Error", "Failed to delete the original sale. Edit aborted.")
                     return
                 is_update = True
@@ -2772,7 +2792,8 @@ class SalesManager(QWidget):
                     delivery_plate=delivery_plate,
                     credit_term_days=credit_term_days,
                     product_qty_in_sale=product_qty_in_sale,
-                    original_sale_id=original_sale_id
+                    original_sale_id=original_sale_id,
+                    send_telegram=send_telegram
                 )
 
         finally:
@@ -2783,7 +2804,7 @@ class SalesManager(QWidget):
     
     def save_live_sale(self, customer_id, user_id, labour_expense, items, 
                        payment_type, payments, delivery_name, 
-                       delivery_phone, delivery_place, delivery_plate, credit_term_days, product_qty_in_sale=None, original_sale_id=None):
+                       delivery_phone, delivery_place, delivery_plate, credit_term_days, product_qty_in_sale=None, original_sale_id=None, send_telegram=True):
         """Save a live sale with inventory impact remove_payment_row"""
         payment_lines = []
         for p in payments:
@@ -2817,7 +2838,8 @@ class SalesManager(QWidget):
             if product_qty_in_sale:
                 for pid, qty in product_qty_in_sale.items():
                     self._add_to_daily_cache(pid, qty)
-            self._send_order_notification(sale, items, sale_date, original_sale_id=original_sale_id)
+            if send_telegram:
+                self._send_order_notification(sale, items, sale_date, original_sale_id=original_sale_id)
             if customer_id:
                 notify_customer_sync(customer_id, sale_id=sale.id)
             QApplication.beep()

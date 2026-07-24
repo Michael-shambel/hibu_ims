@@ -1498,7 +1498,11 @@ class ProductFormDialog(QDialog):
                     num += 1
                 message = "\n".join(msg_lines)
                 logger.info("About to call notify_store_team_sync, product_lines=%d", len(self.product_lines))
-                notify_store_team_sync(message, skip_dedup=True)
+                notify_store_team_sync(
+                    message,
+                    purchase_id=purchase.id,
+                    notification_type='purchase_notification'
+                )
                 supplier_id = purchase_data["supplier_id"]
                 notify_supplier_purchase_sync(supplier_id, purchase_id=purchase.id)
                 self.product_saved.emit(purchase)

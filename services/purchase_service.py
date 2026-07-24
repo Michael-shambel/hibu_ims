@@ -284,18 +284,20 @@ class PurchaseService(BaseService[Purchase]):
             total_paid = 0.0
 
             for row in rows:
+                debit = row.total_debit or 0.0
+                credit = row.total_credit or 0.0
                 if row.entry_type == 'purchase':
-                    total_amount += row.total_debit
+                    total_amount += debit
                 elif row.entry_type == 'payment':
-                    total_paid += row.total_credit
+                    total_paid += credit
                 elif row.entry_type in ('adjustment', 'discount'):
                     # Net effect on total amount: debit increases, credit decreases
-                    total_amount += row.total_debit
-                    total_amount -= row.total_credit
+                    total_amount += debit
+                    total_amount -= credit
                 else:
                     # Fallback: treat as adjustment
-                    total_amount += row.total_debit
-                    total_amount -= row.total_credit
+                    total_amount += debit
+                    total_amount -= credit
 
             return {
                 'total_credit_amount': total_amount,
@@ -405,17 +407,19 @@ class PurchaseService(BaseService[Purchase]):
 
             for row in rows:
                 sid = row.supplier_id
+                debit = row.total_debit or 0.0
+                credit = row.total_credit or 0.0
                 if row.entry_type == 'purchase':
-                    supplier_totals[sid]['total_amount'] += row.total_debit
+                    supplier_totals[sid]['total_amount'] += debit
                 elif row.entry_type == 'payment':
-                    supplier_totals[sid]['paid_amount'] += row.total_credit
+                    supplier_totals[sid]['paid_amount'] += credit
                 elif row.entry_type in ('adjustment', 'discount'):
                     # Net effect on total amount
-                    supplier_totals[sid]['total_amount'] += row.total_debit
-                    supplier_totals[sid]['total_amount'] -= row.total_credit
+                    supplier_totals[sid]['total_amount'] += debit
+                    supplier_totals[sid]['total_amount'] -= credit
                 else:
-                    supplier_totals[sid]['total_amount'] += row.total_debit
-                    supplier_totals[sid]['total_amount'] -= row.total_credit
+                    supplier_totals[sid]['total_amount'] += debit
+                    supplier_totals[sid]['total_amount'] -= credit
 
             # Collect purchase IDs per supplier (for the "View" button)
             purchases = session.query(Purchase).filter(
@@ -474,6 +478,35 @@ class PurchaseService(BaseService[Purchase]):
 
         with get_session() as session:
             try:
+                # ---- 1. Fetch all purchases for this supplier ----
+                all_purchases = session.query(Purchase).options(
+                    joinedload(Purchase.payment_terms)
+                ).filter(
+                    Purchase.supplier_id == supplier_id,
+                    Purchase.is_deleted == False
+                ).all()
+
+                logger.info(f"Found {len(all_purchases)} purchases for supplier {supplier_id}")
+
+                # ---- 2. Force recalculation of EVERY purchase's payment term ----
+                for purchase in all_purchases:
+                    if purchase.payment_terms:
+                        logger.debug(
+                            f"Recalculating purchase {purchase.id} "
+                            f"(batches: {len(purchase.batches) if purchase.batches else 0}, "
+                            f"items_data: {bool(purchase.items_data)})"
+                        )
+                        self.recalc_purchase_total(purchase.id, session, user_id)
+                        session.flush()
+                        session.refresh(purchase)
+                        if purchase.payment_terms:
+                            session.refresh(purchase.payment_terms[0])
+                            logger.debug(
+                                f"After recalc: purchase {purchase.id} term total={purchase.payment_terms[0].total_amount}, "
+                                f"paid={purchase.payment_terms[0].paid_amount}"
+                            )
+
+                # ---- 3. Query for outstanding purchases ----
                 purchases = session.query(Purchase).options(
                     joinedload(Purchase.payment_terms)
                 ).filter(
@@ -484,26 +517,83 @@ class PurchaseService(BaseService[Purchase]):
                     )
                 ).order_by(Purchase.created_at.asc()).all()
 
-                if not purchases:
-                    return False, "No outstanding credit purchases for supplier."
+                logger.info(f"After recalculation, found {len(purchases)} outstanding purchases")
 
+                # ---- 4. If none, repair using the ledger total ----
+                if not purchases:
+                    # Compute total unpaid from the ledger
+                    ledger_total = session.query(
+                        func.coalesce(func.sum(SupplierCreditLedger.debit), 0.0) -
+                        func.coalesce(func.sum(SupplierCreditLedger.credit), 0.0)
+                    ).filter(
+                        SupplierCreditLedger.supplier_id == supplier_id,
+                        SupplierCreditLedger.is_deleted == False
+                    ).scalar() or 0.0
+
+                    logger.warning(
+                        f"No outstanding purchases found. Ledger shows unpaid: {ledger_total:.2f}"
+                    )
+
+                    if ledger_total > 0:
+                        # Find the oldest purchase (or any) to repair
+                        repair_purchase = session.query(Purchase).filter(
+                            Purchase.supplier_id == supplier_id,
+                            Purchase.is_deleted == False
+                        ).order_by(Purchase.created_at.asc()).first()
+
+                        if repair_purchase and repair_purchase.payment_terms:
+                            term = repair_purchase.payment_terms[0]
+                            # Set total_amount so that remaining = ledger_total
+                            # term.paid_amount is assumed to be correct (or zero)
+                            term.total_amount = ledger_total + term.paid_amount
+                            term.update_status()
+                            session.flush()
+                            session.refresh(term)
+                            logger.info(
+                                f"Repaired purchase {repair_purchase.id}: term.total_amount set to {term.total_amount:.2f} "
+                                f"(paid={term.paid_amount:.2f}, remaining={ledger_total:.2f})"
+                            )
+
+                            # Re-query outstanding purchases
+                            purchases = session.query(Purchase).options(
+                                joinedload(Purchase.payment_terms)
+                            ).filter(
+                                Purchase.supplier_id == supplier_id,
+                                Purchase.is_deleted == False,
+                                Purchase.payment_terms.any(
+                                    (PurchasePaymentTerm.total_amount - PurchasePaymentTerm.paid_amount) > 0
+                                )
+                            ).order_by(Purchase.created_at.asc()).all()
+
+                            if not purchases:
+                                # Still nothing – log and return error
+                                return False, (
+                                    "Repair attempted but still no outstanding purchase found. "
+                                    "Please contact support."
+                                )
+                        else:
+                            return False, (
+                                "Ledger shows unpaid balance but no purchase record found to repair. "
+                                "Please contact support."
+                            )
+                    else:
+                        return False, "No outstanding credit purchases for supplier."
+
+                # ---- 5. Proceed with payment allocation (unchanged) ----
                 running_balances = {}
                 for amount, bank_account_id in payments:
                     if amount <= 0:
                         continue
-
                     if bank_account_id not in running_balances:
                         bank_tx_service = BankTransactionService()
                         current_balance = bank_tx_service.get_balance(bank_account_id)
                         running_balances[bank_account_id] = current_balance
-
                     if running_balances[bank_account_id] < amount:
                         return False, (
                             f"Insufficient funds. "
                             f"Available: ${running_balances[bank_account_id]:,.2f}, "
                             f"Required: ${amount:,.2f}"
                         )
-
                     running_balances[bank_account_id] -= amount
 
                 affected_accounts = set()
@@ -533,7 +623,7 @@ class PurchaseService(BaseService[Purchase]):
                     session.flush()
                     affected_accounts.add(bank_account_id)
 
-                    # ✅ Ledger: Payment entry (one per bank transaction)
+                    # Ledger: Payment entry
                     self.ledger_service.add_entry(
                         session=session,
                         supplier_id=supplier_id,
@@ -586,6 +676,7 @@ class PurchaseService(BaseService[Purchase]):
                     BankTransactionService().recalculate_balances_for_account(session, acc_id)
 
                 session.commit()
+                logger.info(f"Supplier payment recorded successfully for supplier {supplier_id}")
                 return True, ""
 
             except Exception as e:
@@ -833,6 +924,7 @@ class PurchaseService(BaseService[Purchase]):
             if not purchase:
                 return False
 
+            # 1. Try to calculate from batches
             new_total = (
                 sess.query(func.sum(
                     ProductBatch.quantity * ProductBatch.cost_price * ProfessionalProduct.dozen
@@ -844,6 +936,13 @@ class PurchaseService(BaseService[Purchase]):
                 )
                 .scalar() or 0.0
             )
+
+            # 2. If no batches exist, fall back to items_data
+            if new_total == 0.0 and purchase.items_data:
+                new_total = sum(
+                    item.get('quantity', 0) * item.get('cost_price', 0.0) * item.get('dozen', 1)
+                    for item in purchase.items_data
+                )
 
             purchase.total_amount = new_total
 
@@ -858,7 +957,6 @@ class PurchaseService(BaseService[Purchase]):
                 term.paid_amount = new_total
                 term.total_amount = new_total
                 term.update_status()
-
                 if surplus > 0:
                     self._allocate_surplus_to_supplier(
                         sess,
@@ -874,15 +972,6 @@ class PurchaseService(BaseService[Purchase]):
 
             return True
 
-        if session:
-            try:
-                return _recalc(session)
-            except Exception as e:
-                logger.error(f"Error recalc purchase {purchase_id} in session: {e}")
-                return False
-        else:
-            with get_session() as session:
-                return _recalc(session)
 
     def _allocate_surplus_to_supplier(
         self,

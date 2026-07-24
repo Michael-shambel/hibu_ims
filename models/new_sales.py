@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from models.engine.database import BaseModel
-from sqlalchemy import Column, Integer, Float, Boolean, ForeignKey, String, JSON
+from sqlalchemy import Column, Integer, Float, Boolean, ForeignKey, String, JSON, Date
 from sqlalchemy.orm import relationship
 
 
@@ -22,6 +22,7 @@ class ProfessionalSale(BaseModel):
     delivery_Plate = Column(String(50), nullable=True)
 
     user_id = Column(Integer, ForeignKey('auth_users.id'), nullable=True)
+    despatch_date = Column(Date, nullable=True, index=True)
 
     customer = relationship("Customer", foreign_keys=[customer_id])
 

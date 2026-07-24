@@ -53,7 +53,7 @@ def is_bot_ready():
     return _bot_ready and _bot_app is not None and _bot_loop is not None
 
 
-def notify_store_team_sync(message: str, sale_id: int = None, skip_dedup: bool = False, notification_type: str = 'order_notification'):
+def notify_store_team_sync(message: str, sale_id: int = None, purchase_id: int = None, skip_dedup: bool = False, notification_type: str = 'order_notification'):
     """Queue an order notification message to all sales team members."""
     with get_session() as session:
         users = session.query(AuthUser).filter(
@@ -62,9 +62,12 @@ def notify_store_team_sync(message: str, sale_id: int = None, skip_dedup: bool =
             AuthUser.is_deleted == False
         ).all()
         for user in users:
-            queue_notification(notification_type, user.chat_id,
-                               {'text': message, 'parse_mode': 'HTML', 'sale_id': sale_id},
-                               skip_dedup=skip_dedup)
+            payload = {'text': message, 'parse_mode': 'HTML'}
+            if sale_id:
+                payload['sale_id'] = str(sale_id)
+            if purchase_id:
+                payload['purchase_id'] = str(purchase_id)   # new
+            queue_notification(notification_type, user.chat_id, payload, skip_dedup)
 
 def notify_customer_sync(customer_id: int, target_date: date = None, sale_id: int = None):
     """Queue a customer daily summary notification for the customer + admin copy.
