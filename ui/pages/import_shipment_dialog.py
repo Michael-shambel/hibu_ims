@@ -10,16 +10,234 @@ from PySide6.QtWidgets import (
     QSpinBox, QFormLayout, QGroupBox, QWidget, QApplication
 )
 from PySide6.QtCore import Qt, QDate
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QColor
 
 # Import modern widgets from product_dialog
 from ui.pages.product_dialog import ModernComboBox, ModernDoubleSpinBox
 from ui.components.ethiopian_date import EthiopianDateEdit
 from ui.components.universal_crud_dialog import UniversalCRUDDialog
+from ui.pages.product_dialog import ModernComboBox, ModernDoubleSpinBox, ProductCompleter, ModernLineEdit, ModernSpinBox
+from services.new_product_service import NewProductService
 from services.supplier_service import SupplierService
 from services.bank_account_service import BankAccountService
 
+class AddProductLineDialog(QDialog):
+    def __init__(self, product_service, parent=None):
+        super().__init__(parent)
+        self.product_service = product_service
+        self.setWindowTitle("Add Product Line")
+        self.setModal(True)
+        self.setMinimumWidth(550)
+        self.setMaximumHeight(650)
 
+        self.setWindowFlags(
+            Qt.Window |
+            Qt.WindowCloseButtonHint |
+            Qt.WindowMinimizeButtonHint |
+            Qt.WindowMaximizeButtonHint
+        )
+        self.setWindowModality(Qt.WindowModal)
+        
+        self.init_ui()
+
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
+
+        # --- Title ---
+        title = QLabel("➕ Add Product to Shipment")
+        title.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        title.setStyleSheet("color: #2c3e50; margin-bottom: 10px;")
+        main_layout.addWidget(title)
+
+        # --- Form ---
+        form_widget = QWidget()
+        form_widget.setStyleSheet("""
+            QWidget {
+                background-color: #f8f9fa;
+                border-radius: 10px;
+            }
+        """)
+        form_layout = QFormLayout(form_widget)
+        form_layout.setContentsMargins(20, 20, 20, 20)
+        form_layout.setSpacing(15)
+
+        # Product Name (with autocomplete)
+        self.name_input = ModernLineEdit("Product Name", "Start typing product name...")
+
+        # Set up the completer
+        self.completer = ProductCompleter(self.product_service, parent=self)
+        self.completer.setLineEdit(self.name_input.line_edit)
+        self.completer.productSelected.connect(self.on_product_selected)
+        self.name_input.textChanged.connect(self.completer.update)
+        form_layout.addRow("Product Name:", self.name_input)
+
+        # Item Number (Supplier SKU)
+        self.item_number_input = ModernLineEdit("Item #", "Supplier's item number")
+        form_layout.addRow("Item #:", self.item_number_input)
+
+        # Unit (auto-filled by completer)
+        self.unit_input = ModernLineEdit("Unit", "e.g., pcs, kg, set")
+        form_layout.addRow("Unit:", self.unit_input)
+
+        # Cartons
+        self.cartons_input = ModernSpinBox("Cartons", 1, 10000)
+        self.cartons_input.spin_box.valueChanged.connect(self.update_preview)
+        form_layout.addRow("Cartons:", self.cartons_input)
+
+        # Qty per Carton
+        self.qty_per_input = ModernSpinBox("Qty/Carton", 1, 10000)
+        self.qty_per_input.spin_box.valueChanged.connect(self.update_preview)
+        form_layout.addRow("Qty/Carton:", self.qty_per_input)
+
+        # Unit Price (RMB)
+        self.price_input = ModernDoubleSpinBox("Unit Price (RMB)", 0.01, 1000000.0, 2, "¥")
+        self.price_input.spin_box.valueChanged.connect(self.update_preview)
+        form_layout.addRow("Unit Price (RMB):", self.price_input)
+
+        # CBM per Carton
+        self.cbm_input = ModernDoubleSpinBox("CBM/Carton", 0.0, 1000.0, 3, "")
+        self.cbm_input.spin_box.valueChanged.connect(self.update_preview)
+        form_layout.addRow("CBM/Carton:", self.cbm_input)
+
+        main_layout.addWidget(form_widget)
+
+        # --- Preview Section ---
+        preview_group = QGroupBox("Preview")
+        preview_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 15px;
+                padding: 0 8px 0 8px;
+            }
+        """)
+        preview_layout = QHBoxLayout(preview_group)
+        
+        self.preview_qty_label = QLabel("Total Qty: 0")
+        self.preview_qty_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        self.preview_qty_label.setStyleSheet("color: #27ae60;")
+        
+        self.preview_cbm_label = QLabel("Total CBM: 0.000")
+        self.preview_cbm_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        self.preview_cbm_label.setStyleSheet("color: #3498db;")
+        
+        preview_layout.addWidget(self.preview_qty_label)
+        preview_layout.addStretch()
+        preview_layout.addWidget(self.preview_cbm_label)
+        
+        main_layout.addWidget(preview_group)
+        
+        # --- Buttons ---
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+        
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setFixedSize(120, 40)
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f1f5f9;
+                color: #475569;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                font-weight: 500;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #e2e8f0;
+            }
+        """)
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        self.add_btn = QPushButton("✅ Add to List")
+        self.add_btn.setFixedSize(140, 40)
+        self.add_btn.setCursor(Qt.PointingHandCursor)
+        self.add_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: 600;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+        self.add_btn.clicked.connect(self.accept)
+        
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addWidget(self.add_btn)
+        
+        main_layout.addLayout(btn_layout)
+        
+        # Initial preview
+        self.update_preview()
+
+    def on_product_selected(self, product_id):
+        """When a product is selected via autocomplete, fill unit."""
+        product = self.product_service.get_by_id(product_id)
+        if product:
+            self.unit_input.setText(product.unit or "")
+
+    def update_preview(self):
+        """Update the preview labels with current values."""
+        try:
+            cartons = self.cartons_input.value()
+            qty_per = self.qty_per_input.value()
+            cbm = self.cbm_input.value()
+            
+            total_qty = cartons * qty_per
+            total_cbm = cartons * cbm
+            
+            self.preview_qty_label.setText(f"Total Qty: {total_qty:,}")
+            self.preview_cbm_label.setText(f"Total CBM: {total_cbm:.3f}")
+        except Exception:
+            self.preview_qty_label.setText("Total Qty: 0")
+            self.preview_cbm_label.setText("Total CBM: 0.000")
+
+    def validate_inputs(self):
+        """Validate that required fields are filled."""
+        if not self.name_input.text().strip():
+            QMessageBox.warning(self, "Validation", "Product Name is required.")
+            return False
+        if self.cartons_input.value() <= 0:
+            QMessageBox.warning(self, "Validation", "Cartons must be greater than 0.")
+            return False
+        if self.qty_per_input.value() <= 0:
+            QMessageBox.warning(self, "Validation", "Qty per Carton must be greater than 0.")
+            return False
+        if self.price_input.value() <= 0:
+            QMessageBox.warning(self, "Validation", "Unit Price must be greater than 0.")
+            return False
+        return True
+    
+    def get_data(self):
+        """Return the product data as a dict."""
+        return {
+            "item_number": self.item_number_input.text().strip() or None,
+            "product_name": self.name_input.text().strip(),
+            "unit": self.unit_input.text().strip() or "pcs",
+            "cartons": self.cartons_input.value(),
+            "qty_per_carton": self.qty_per_input.value(),
+            "unit_price_rmb": self.price_input.value(),
+            "cbm_per_carton": self.cbm_input.value(),
+        }
+    
+    def accept(self):
+        """Validate before closing."""
+        if self.validate_inputs():
+            super().accept()
 class ImportShipmentDialog(QDialog):
     """Single-tab dialog for shipment details (UI only)."""
 
@@ -28,6 +246,7 @@ class ImportShipmentDialog(QDialog):
         self.current_user = current_user
         self.mode = mode          # 'create', 'edit', 'view'
         self.shipment_id = shipment_id
+        self.product_service = NewProductService()
 
         # --- ADD THIS BLOCK ---
         # Enable minimize and maximize buttons
@@ -137,7 +356,7 @@ class ImportShipmentDialog(QDialog):
         # ---- Product Toolbar ----
         prod_btn_layout = QHBoxLayout()
         self.add_prod_btn = QPushButton("➕ Add Product")
-        self.add_prod_btn.clicked.connect(lambda: QMessageBox.information(self, "Coming Soon", "Add product dialog will be implemented in the next phase."))
+        self.add_prod_btn.clicked.connect(self.open_add_product_dialog)
         self.import_excel_btn = QPushButton("📂 Import from Excel")
         self.import_excel_btn.clicked.connect(lambda: QMessageBox.information(self, "Coming Soon", "Excel import will be implemented in the next phase."))
         self.remove_prod_btn = QPushButton("🗑️ Remove Selected")
@@ -175,6 +394,58 @@ class ImportShipmentDialog(QDialog):
         # Populate combos with real data from database
         self.populate_suppliers()
         self.populate_banks()
+
+    def open_add_product_dialog(self):
+        """Open the dialog to add a product line."""
+        dialog = AddProductLineDialog(self.product_service, self)
+        if dialog.exec() == QDialog.Accepted:
+            data = dialog.get_data()
+            self.add_product_row_to_table(data)
+
+    def add_product_row_to_table(self, data):
+        """Add a product row to the table using the provided data."""
+        row = self.product_table.rowCount()
+        self.product_table.insertRow(row)
+        
+        # Item #
+        self.product_table.setItem(row, 0, QTableWidgetItem(data.get("item_number", "")))
+        
+        # Product Name
+        self.product_table.setItem(row, 1, QTableWidgetItem(data["product_name"]))
+        
+        # Unit (ComboBox)
+        unit_combo = QComboBox()
+        unit_combo.addItems(["pcs", "kg", "set", "box", "m", "L"])
+        idx = unit_combo.findText(data.get("unit", "pcs"))
+        if idx >= 0:
+            unit_combo.setCurrentIndex(idx)
+        self.product_table.setCellWidget(row, 2, unit_combo)
+        
+        # Cartons
+        self.product_table.setItem(row, 3, QTableWidgetItem(str(data["cartons"])))
+        
+        # Qty per Carton
+        self.product_table.setItem(row, 4, QTableWidgetItem(str(data["qty_per_carton"])))
+        
+        # Total Qty (calculated)
+        total_qty = data["cartons"] * data["qty_per_carton"]
+        total_qty_item = QTableWidgetItem(str(total_qty))
+        total_qty_item.setFlags(total_qty_item.flags() & ~Qt.ItemIsEditable)
+        total_qty_item.setBackground(QColor(240, 240, 240))
+        self.product_table.setItem(row, 5, total_qty_item)
+        
+        # Unit Price (RMB)
+        self.product_table.setItem(row, 6, QTableWidgetItem(f"{data['unit_price_rmb']:.2f}"))
+        
+        # CBM per Carton
+        self.product_table.setItem(row, 7, QTableWidgetItem(f"{data.get('cbm_per_carton', 0.0):.3f}"))
+        
+        # Total CBM (calculated)
+        total_cbm = data["cartons"] * data.get("cbm_per_carton", 0.0)
+        total_cbm_item = QTableWidgetItem(f"{total_cbm:.3f}")
+        total_cbm_item.setFlags(total_cbm_item.flags() & ~Qt.ItemIsEditable)
+        total_cbm_item.setBackground(QColor(240, 240, 240))
+        self.product_table.setItem(row, 8, total_cbm_item)
 
     def populate_suppliers(self):
         """Load suppliers from database into ModernComboBox."""
