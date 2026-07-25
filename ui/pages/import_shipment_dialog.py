@@ -22,7 +22,7 @@ from services.bank_account_service import BankAccountService
 from services.new_product_service import NewProductService
 
 # ------------------------------------------------------------------
-# Excel Preview Dialog (UPDATED)
+# Excel Preview Dialog (FULLY UPDATED – with working autocomplete)
 # ------------------------------------------------------------------
 class ExcelPreviewDialog(QDialog):
     """Dialog to preview Excel data and assign local names before import."""
@@ -138,6 +138,9 @@ class ExcelPreviewDialog(QDialog):
         """Fill the table with Excel data and add editable Local Name fields with autocomplete."""
         self.preview_table.setRowCount(len(self.excel_data))
         
+        # --- Set default row height for ALL rows ---
+        self.preview_table.verticalHeader().setDefaultSectionSize(70)  # <-- LARGE ROWS
+        
         total_cartons = 0
         total_qty = 0
         total_amount = 0.0
@@ -147,41 +150,31 @@ class ExcelPreviewDialog(QDialog):
             # Column 0: Row number
             self.preview_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
             
-            # Column 1: Item Code (full, e.g., "3033674-35cm")
+            # Column 1: Item Code
             item_code = data.get("item_code", "")
             self.preview_table.setItem(row, 1, QTableWidgetItem(item_code))
             
-            # Column 2: Local Name (Editable QLineEdit with Autocomplete)
-            local_name_edit = QLineEdit()
-            local_name_edit.setPlaceholderText("Type local product name...")
-            local_name_edit.setStyleSheet("""
-                QLineEdit {
-                    border: 1px solid #d1d5db;
-                    border-radius: 4px;
-                    padding: 4px 8px;
-                    font-size: 13px;
-                }
-                QLineEdit:focus {
-                    border: 2px solid #3498db;
-                }
-            """)
-            # --- Add autocomplete and connect signal ---
+            # Column 2: Local Name (ModernLineEdit with Autocomplete)
+            local_name_edit = ModernLineEdit("Local Name", "Type local product name...")
+            local_name_edit.setMinimumHeight(55)  # <-- TALL ENOUGH FOR EASY TYPING
+            
+            # Set up the completer
             completer = ProductCompleter(self.product_service, parent=self)
-            completer.setLineEdit(local_name_edit)
-            # IMPORTANT: Connect the signal to the class method
+            completer.setLineEdit(local_name_edit.line_edit)
             completer.productSelected.connect(lambda pid, r=row: self.on_local_name_selected(r, pid))
+            local_name_edit.textChanged.connect(completer.update)
             self.preview_table.setCellWidget(row, 2, local_name_edit)
             
-            # Column 3: CTNS (Cartons)
+            # Column 3: CTNS
             cartons = data.get("cartons", 0)
             self.preview_table.setItem(row, 3, QTableWidgetItem(str(cartons)))
             total_cartons += cartons
             
-            # Column 4: QTY (per carton)
+            # Column 4: QTY
             qty_per = data.get("qty_per_carton", 0)
             self.preview_table.setItem(row, 4, QTableWidgetItem(str(qty_per)))
             
-            # Column 5: T.QTY (computed: CTNS × QTY, read-only)
+            # Column 5: T.QTY (computed)
             total_qty_row = cartons * qty_per
             qty_item = QTableWidgetItem(str(total_qty_row))
             qty_item.setFlags(qty_item.flags() & ~Qt.ItemIsEditable)
@@ -189,11 +182,11 @@ class ExcelPreviewDialog(QDialog):
             self.preview_table.setItem(row, 5, qty_item)
             total_qty += total_qty_row
             
-            # Column 6: PRICE (Unit Price)
+            # Column 6: PRICE
             unit_price = data.get("unit_price_rmb", 0.0)
             self.preview_table.setItem(row, 6, QTableWidgetItem(f"{unit_price:.2f}"))
             
-            # Column 7: AMOUNT (computed: T.QTY × PRICE, read-only)
+            # Column 7: AMOUNT (computed)
             row_amount = total_qty_row * unit_price
             total_amount += row_amount
             amt_item = QTableWidgetItem(f"{row_amount:.2f}")
@@ -201,11 +194,11 @@ class ExcelPreviewDialog(QDialog):
             amt_item.setBackground(QColor(240, 240, 240))
             self.preview_table.setItem(row, 7, amt_item)
             
-            # Column 8: CBM (per carton)
+            # Column 8: CBM
             cbm = data.get("cbm_per_carton", 0.0)
             self.preview_table.setItem(row, 8, QTableWidgetItem(f"{cbm:.3f}"))
             
-            # Column 9: T.CBM (computed: CTNS × CBM, read-only)
+            # Column 9: T.CBM (computed)
             row_cbm = cartons * cbm
             total_cbm += row_cbm
             cbm_item = QTableWidgetItem(f"{row_cbm:.3f}")
@@ -216,6 +209,7 @@ class ExcelPreviewDialog(QDialog):
         # --- Add Summary Row (Footer) ---
         footer_row = self.preview_table.rowCount()
         self.preview_table.insertRow(footer_row)
+        self.preview_table.setRowHeight(footer_row, 50)  # <-- SUMMARY ROW HEIGHT (slightly smaller)
         
         bold_font = QFont("Segoe UI", 10, QFont.Bold)
         
@@ -255,17 +249,17 @@ class ExcelPreviewDialog(QDialog):
         self.preview_table.setItem(footer_row, 9, cbm_item)
     
     # ------------------------------------------------------------------
-    # This is a proper class method (NOT nested inside populate_table)
+    # Method called when a product is selected from autocomplete
     # ------------------------------------------------------------------
     def on_local_name_selected(self, row, product_id):
         """
         Called when a product is selected from autocomplete.
-        You can use this to auto-fill other fields like Unit.
+        You can auto-fill other fields here if needed.
         """
         product = self.product_service.get_by_id(product_id)
         if product:
-            # For example, auto-fill unit in the main table later
-            # Right now we just store the selection
+            # Optionally, you could pre-fill the Unit field in the main table
+            # For now, we just store the selection
             pass
     
     def get_import_data(self):
@@ -273,12 +267,12 @@ class ExcelPreviewDialog(QDialog):
         imported = []
         # Stop before the summary row (last row)
         for row in range(self.preview_table.rowCount() - 1):
-            # Get the Local Name
+            # Get the Local Name from ModernLineEdit
             local_name_widget = self.preview_table.cellWidget(row, 2)
-            local_name = local_name_widget.text().strip() if local_name_widget else ""
-            
-            if not local_name:
-                continue
+            if isinstance(local_name_widget, ModernLineEdit):
+                local_name = local_name_widget.text().strip()
+            else:
+                local_name = local_name_widget.text().strip() if hasattr(local_name_widget, 'text') else ""
             
             # Get other data (columns: 1=Item Code, 3=CTNS, 4=QTY, 6=PRICE, 8=CBM)
             item_code = self.preview_table.item(row, 1).text() if self.preview_table.item(row, 1) else ""
@@ -287,9 +281,10 @@ class ExcelPreviewDialog(QDialog):
             unit_price = float(self.preview_table.item(row, 6).text()) if self.preview_table.item(row, 6) else 0.0
             cbm = float(self.preview_table.item(row, 8).text()) if self.preview_table.item(row, 8) else 0.0
             
+            # Use local_name (which may be empty) – do NOT fall back to item_code
             imported.append({
                 "item_number": item_code,
-                "product_name": local_name,
+                "product_name": local_name,  # May be empty
                 "unit": "pcs",
                 "cartons": cartons,
                 "qty_per_carton": qty_per,
@@ -610,9 +605,10 @@ class ImportShipmentDialog(QDialog):
 
         # Exchange Rate: ModernDoubleSpinBox
         self.rate_spin = ModernDoubleSpinBox("Exchange Rate", 0.01, 200.0, 4, "")
-        self.rate_spin.spin_box.setValue(7.85)
+        self.rate_spin.spin_box.setValue(17.85)
         self.rate_spin.spin_box.setPrefix("1 RMB = ")
         self.rate_spin.spin_box.setSuffix(" ETB")
+        self.rate_spin.spin_box.valueChanged.connect(self.update_total_display)
         header_layout.addRow("Exchange Rate:", self.rate_spin)
 
         layout.addWidget(header_group)
@@ -622,13 +618,39 @@ class ImportShipmentDialog(QDialog):
         products_layout = QVBoxLayout(products_group)
 
         self.product_table = QTableWidget()
+        self.product_table.verticalHeader().setDefaultSectionSize(70)
         self.product_table.setColumnCount(10)
         self.product_table.setHorizontalHeaderLabels([
             "Item #", "Product Name", "Unit", "Cartons",
             "Qty/Carton", "Total Qty", "Unit Price (RMB)",
             "Total Amount (RMB)", "CBM/Carton", "Total CBM"
         ])
-        self.product_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        # --- Set column widths ---
+        # 0: Item # (compact)
+        self.product_table.setColumnWidth(0, 100)
+        # 1: Product Name (will stretch)
+        self.product_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        # 2: Unit
+        self.product_table.setColumnWidth(2, 70)
+        # 3: Cartons
+        self.product_table.setColumnWidth(3, 70)
+        # 4: Qty/Carton
+        self.product_table.setColumnWidth(4, 80)
+        # 5: Total Qty
+        self.product_table.setColumnWidth(5, 80)
+        # 6: Unit Price (RMB)
+        self.product_table.setColumnWidth(6, 100)
+        # 7: Total Amount (RMB)
+        self.product_table.setColumnWidth(7, 120)
+        # 8: CBM/Carton
+        self.product_table.setColumnWidth(8, 80)
+        # 9: Total CBM
+        self.product_table.setColumnWidth(9, 80)
+
+        # For the remaining columns, set resize mode to Fixed so they don't stretch
+        for col in [0, 2, 3, 4, 5, 6, 7, 8, 9]:
+            self.product_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.Fixed)
+
         self.product_table.setAlternatingRowColors(True)
         # Connect item changed signal for auto-calculation
         self.product_table.itemChanged.connect(self.on_table_item_changed)
@@ -637,18 +659,132 @@ class ImportShipmentDialog(QDialog):
         # ---- Product Toolbar ----
         prod_btn_layout = QHBoxLayout()
         self.add_prod_btn = QPushButton("➕ Add Product")
+        self.add_prod_btn.setMinimumHeight(40)
+        self.add_prod_btn.setMinimumWidth(140)
+        self.add_prod_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #3498db, stop:1 #2980b9);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: 600;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2980b9, stop:1 #2471a3);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2471a3, stop:1 #1a5276);
+            }
+        """)
         self.add_prod_btn.clicked.connect(self.open_add_product_dialog)
 
         self.import_excel_btn = QPushButton("📂 Import from Excel")
+        self.import_excel_btn.setMinimumHeight(40)
+        self.import_excel_btn.setMinimumWidth(160)
+        self.import_excel_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2ecc71, stop:1 #27ae60);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: 600;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #27ae60, stop:1 #219a52);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #219a52, stop:1 #1e8449);
+            }
+        """)
         self.import_excel_btn.clicked.connect(self.open_excel_import_dialog)
 
         self.remove_prod_btn = QPushButton("🗑️ Remove Selected")
+        self.remove_prod_btn.setMinimumHeight(40)
+        self.remove_prod_btn.setMinimumWidth(140)
+        self.remove_prod_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #e74c3c, stop:1 #c0392b);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: 600;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #c0392b, stop:1 #a93226);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #a93226, stop:1 #922b21);
+            }
+            QPushButton:disabled {
+                background: #bdc3c7;
+                color: #7f8c8d;
+            }
+        """)
         self.remove_prod_btn.clicked.connect(self.remove_selected_product)
+
+        self.clear_all_btn = QPushButton("🗑️ Clear All")
+        self.clear_all_btn.setMinimumHeight(40)
+        self.clear_all_btn.setMinimumWidth(120)
+        self.clear_all_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f39c12, stop:1 #e67e22);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: 600;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #e67e22, stop:1 #d35400);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #d35400, stop:1 #a04000);
+            }
+            QPushButton:disabled {
+                background: #bdc3c7;
+                color: #7f8c8d;
+            }
+        """)
+        self.clear_all_btn.clicked.connect(self.clear_all_rows)
 
         prod_btn_layout.addWidget(self.add_prod_btn)
         prod_btn_layout.addWidget(self.import_excel_btn)
         prod_btn_layout.addWidget(self.remove_prod_btn)
+        prod_btn_layout.addWidget(self.clear_all_btn)
         prod_btn_layout.addStretch()
+
+        self.total_display_label = QLabel("Total: ¥0.00 RMB  |  ETB 0.00")
+        self.total_display_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        self.total_display_label.setStyleSheet("""
+            QLabel {
+                color: #2c3e50;
+                background-color: #f8f9fa;
+                padding: 6px 16px;
+                border-radius: 6px;
+                border: 1px solid #e0e0e0;
+            }
+        """)
+        self.total_display_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        prod_btn_layout.addWidget(self.total_display_label)
         products_layout.addLayout(prod_btn_layout)
 
         layout.addWidget(products_group)
@@ -678,7 +814,94 @@ class ImportShipmentDialog(QDialog):
         self.populate_suppliers()
         self.populate_banks()
 
-    # ------------------------------------------------------------------
+    def clear_all_rows(self):
+        """Clear all product rows from the table after confirmation."""
+        row_count = self.product_table.rowCount()
+        
+        # Check if there are any actual product rows (excluding summary row)
+        has_products = False
+        for row in range(row_count):
+            if self.product_table.item(row, 0) and self.product_table.item(row, 0).text() != "TOTAL":
+                name_item = self.product_table.item(row, 1)
+                if name_item and name_item.text().strip():
+                    has_products = True
+                    break
+        
+        if not has_products:
+            QMessageBox.information(self, "Table Empty", "There are no products to clear.")
+            return
+        
+        # Confirm with the user
+        reply = QMessageBox.question(
+            self,
+            "Confirm Clear All",
+            "Are you sure you want to remove all products from this shipment?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Block signals to avoid triggering itemChanged events
+        self.product_table.blockSignals(True)
+        
+        # Clear the summary row first
+        self.clear_summary_row()
+        
+        # Remove all rows (keep one empty row for adding new products)
+        self.product_table.setRowCount(0)
+        self.product_table.setRowCount(1)
+        
+        # Clear all cells in the empty row
+        for col in range(self.product_table.columnCount()):
+            self.product_table.setItem(0, col, QTableWidgetItem(""))
+        
+        # Also clear any cell widgets in the empty row
+        for col in range(self.product_table.columnCount()):
+            self.product_table.setCellWidget(0, col, None)
+        
+        self.product_table.blockSignals(False)
+        
+        # Update totals and summary
+        self.update_total_display()
+        self.update_table_summary()
+        
+        QMessageBox.information(self, "Cleared", "All products have been removed.")
+
+    def update_total_display(self):
+        """Update the total amount display (RMB and ETB)."""
+        row_count = self.product_table.rowCount()
+        
+        if row_count == 0:
+            self.total_display_label.setText("Total: ¥0.00 RMB  |  ETB 0.00")
+            return
+        
+        total_amount_rmb = 0.0
+        
+        for row in range(row_count):
+            # Skip the summary row
+            if self.product_table.item(row, 0) and self.product_table.item(row, 0).text() == "TOTAL":
+                continue
+            
+            # Get Total Amount (column 7)
+            amount_item = self.product_table.item(row, 7)
+            if amount_item:
+                try:
+                    amount = float(amount_item.text().replace(',', '') or 0)
+                    total_amount_rmb += amount
+                except ValueError:
+                    pass
+        
+        # Get exchange rate
+        exchange_rate = self.rate_spin.spin_box.value()
+        total_amount_etb = total_amount_rmb * exchange_rate
+        
+        # Update the display
+        self.total_display_label.setText(
+            f"Total: ¥{total_amount_rmb:,.2f} RMB  |  ETB {total_amount_etb:,.2f}"
+        )
+        # ------------------------------------------------------------------
     # Populate combo boxes from database
     # ------------------------------------------------------------------
     def populate_suppliers(self):
@@ -726,11 +949,20 @@ class ImportShipmentDialog(QDialog):
         row = self.product_table.rowCount()
         self.product_table.insertRow(row)
         
-        # Column 0: Item #
+        # Column 0: Item # (plain text)
         self.product_table.setItem(row, 0, QTableWidgetItem(data.get("item_number", "")))
         
-        # Column 1: Product Name
-        self.product_table.setItem(row, 1, QTableWidgetItem(data["product_name"]))
+        # Column 1: Product Name (Editable with Autocomplete)
+        name_edit = ModernLineEdit("Product Name", "Type local product name...")
+        name_edit.setText(data.get("product_name", ""))
+        name_edit.setMinimumHeight(35)
+        
+        # Set up completer
+        completer = ProductCompleter(self.product_service, parent=self)
+        completer.setLineEdit(name_edit.line_edit)
+        completer.productSelected.connect(lambda pid, r=row: self.on_product_selected_in_table(r, pid))
+        name_edit.textChanged.connect(completer.update)
+        self.product_table.setCellWidget(row, 1, name_edit)
         
         # Column 2: Unit (ComboBox)
         unit_combo = QComboBox()
@@ -756,7 +988,7 @@ class ImportShipmentDialog(QDialog):
         # Column 6: Unit Price (RMB)
         self.product_table.setItem(row, 6, QTableWidgetItem(f"{data['unit_price_rmb']:.2f}"))
         
-        # Column 7: Total Amount (RMB) (calculated, read-only) - NEW!
+        # Column 7: Total Amount (RMB) (calculated, read-only)
         total_amount = total_qty * data["unit_price_rmb"]
         amount_item = QTableWidgetItem(f"{total_amount:.2f}")
         amount_item.setFlags(amount_item.flags() & ~Qt.ItemIsEditable)
@@ -774,6 +1006,8 @@ class ImportShipmentDialog(QDialog):
         self.product_table.setItem(row, 9, cbm_item)
         
         self.product_table.blockSignals(False)
+        self.update_table_summary()
+        self.update_total_display()
 
     def remove_selected_product(self):
         """Remove the currently selected product row from the table."""
@@ -784,6 +1018,8 @@ class ImportShipmentDialog(QDialog):
 
         row = selected[0].row()
         self.product_table.removeRow(row)
+        self.update_table_summary()
+        self.update_total_display()
 
         # If no rows left, add an empty row so the user can add more
         if self.product_table.rowCount() == 0:
@@ -847,6 +1083,8 @@ class ImportShipmentDialog(QDialog):
             pass
         finally:
             self._updating = False
+        self.update_table_summary()
+        self.update_total_display()
 
     # ------------------------------------------------------------------
     # Excel Import
@@ -1001,12 +1239,132 @@ class ImportShipmentDialog(QDialog):
             # Add each product to the main table
             for product_data in imported_products:
                 self.add_product_row_to_table(product_data)
+            self.update_total_display()
             
             QMessageBox.information(
                 self,
                 "Import Complete",
                 f"Successfully imported {len(imported_products)} products."
             )
+
+    def update_table_summary(self):
+        """Update the summary row at the bottom of the product table."""
+        row_count = self.product_table.rowCount()
+        
+        # If table is empty or has only 1 row with no data, clear summary
+        if row_count == 0 or (row_count == 1 and self.is_row_empty(0)):
+            self.clear_summary_row()
+            return
+        
+        total_cartons = 0
+        total_amount = 0.0
+        total_cbm = 0.0
+        
+        for row in range(row_count):
+            # Skip the summary row itself (if it exists)
+            if self.product_table.item(row, 0) and self.product_table.item(row, 0).text() == "TOTAL":
+                continue
+            
+            # Get Cartons (column 3)
+            cartons_item = self.product_table.item(row, 3)
+            if cartons_item:
+                try:
+                    cartons = float(cartons_item.text() or 0)
+                    total_cartons += cartons
+                except ValueError:
+                    pass
+            
+            # Get Total Amount (column 7)
+            amount_item = self.product_table.item(row, 7)
+            if amount_item:
+                try:
+                    amount = float(amount_item.text().replace(',', '') or 0)
+                    total_amount += amount
+                except ValueError:
+                    pass
+            
+            # Get Total CBM (column 9)
+            cbm_item = self.product_table.item(row, 9)
+            if cbm_item:
+                try:
+                    cbm = float(cbm_item.text() or 0)
+                    total_cbm += cbm
+                except ValueError:
+                    pass
+        
+        # Update or create the summary row
+        self.update_summary_row(total_cartons, total_amount, total_cbm)
+
+    def is_row_empty(self, row):
+        """Check if a row is empty (no product name)."""
+        name_item = self.product_table.item(row, 1)
+        return name_item is None or not name_item.text().strip()
+
+    def clear_summary_row(self):
+        """Remove the summary row if it exists."""
+        row_count = self.product_table.rowCount()
+        for row in range(row_count - 1, -1, -1):
+            item = self.product_table.item(row, 0)
+            if item and item.text() == "TOTAL":
+                self.product_table.removeRow(row)
+                break
+
+    def update_summary_row(self, total_cartons, total_amount, total_cbm):
+        """Update or create the summary row with totals."""
+        # Remove existing summary row first
+        self.clear_summary_row()
+        
+        # Add new summary row at the bottom
+        row = self.product_table.rowCount()
+        self.product_table.insertRow(row)
+        self.product_table.setRowHeight(row, 35)
+        
+        # Bold font for summary
+        bold_font = QFont("Segoe UI", 10, QFont.Bold)
+        
+        # Column 0: "TOTAL" label
+        label_item = QTableWidgetItem("TOTAL")
+        label_item.setFont(bold_font)
+        label_item.setBackground(QColor(230, 240, 255))
+        self.product_table.setItem(row, 0, label_item)
+        
+        # Span columns 1-2
+        self.product_table.setSpan(row, 1, 1, 2)
+        
+        # Column 3: Total Cartons
+        cartons_item = QTableWidgetItem(str(int(total_cartons)))
+        cartons_item.setFont(bold_font)
+        cartons_item.setBackground(QColor(230, 240, 255))
+        self.product_table.setItem(row, 3, cartons_item)
+        
+        # Column 5: Total Qty (leave empty or show total)
+        # You could also add total qty here if needed
+        
+        # Column 7: Total Amount
+        amount_item = QTableWidgetItem(f"{total_amount:,.2f}")
+        amount_item.setFont(bold_font)
+        amount_item.setBackground(QColor(230, 240, 255))
+        amount_item.setForeground(QColor(39, 174, 96))  # Green
+        self.product_table.setItem(row, 7, amount_item)
+        
+        # Column 9: Total CBM
+        cbm_item = QTableWidgetItem(f"{total_cbm:.3f}")
+        cbm_item.setFont(bold_font)
+        cbm_item.setBackground(QColor(230, 240, 255))
+        cbm_item.setForeground(QColor(52, 152, 219))  # Blue
+        self.product_table.setItem(row, 9, cbm_item)
+
+
+    def on_product_selected_in_table(self, row, product_id):
+        """When a product is selected from autocomplete in the main table, update the unit."""
+        product = self.product_service.get_by_id(product_id)
+        if product:
+            # Update the unit combo box in column 2
+            unit_combo = self.product_table.cellWidget(row, 2)
+            if unit_combo and isinstance(unit_combo, QComboBox):
+                idx = unit_combo.findText(product.unit or "pcs")
+                if idx >= 0:
+                    unit_combo.setCurrentIndex(idx)
 
     # ------------------------------------------------------------------
     # Read-only mode
