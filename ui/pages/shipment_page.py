@@ -178,7 +178,7 @@ class ImportShipmentPage(QWidget):
         return table
 
     def open_new_shipment_dialog(self):
-        from ui.pages.import_shipment_dialog import ImportShipmentDialog
+        from ui.pages.import_shipment import ImportShipmentDialog
         dialog = ImportShipmentDialog(
             parent=self,
             current_user=self.current_user,
