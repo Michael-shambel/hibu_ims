@@ -28,3 +28,4 @@ from .marketing_campaign_log import MarketingCampaignLog
 from .customers import Customer
 from .customer_daily_notification import CustomerDailyNotification
 from .cash_loan import CashLoan
+from .cost_type import CostType
