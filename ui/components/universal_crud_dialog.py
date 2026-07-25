@@ -86,6 +86,17 @@ class UniversalCRUDDialog(QDialog):
                 {'name': 'commission_rate', 'label': 'Commission Rate', 'type': 'double', 'suffix': '%', 'max': 100.0},
                 {'name': 'is_active', 'label': 'Active', 'type': 'checkbox', 'default': True}
             ]
+        },
+        'cost_type': {
+            'title': 'Manage Cost Types',
+            'service_class': None,  # Will be injected
+            'columns': ['ID', 'Name', 'Description', 'Active'],
+            'id_column': 0,
+            'fields': [
+                {'name': 'name', 'label': 'Cost Type Name*', 'type': 'text', 'required': True},
+                {'name': 'description', 'label': 'Description', 'type': 'text'},
+                {'name': 'is_active', 'label': 'Active', 'type': 'checkbox', 'default': True}
+            ]
         }
     }
 

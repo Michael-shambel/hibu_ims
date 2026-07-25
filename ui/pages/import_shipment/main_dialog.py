@@ -2,8 +2,8 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QDateEdit, QDoubleSpinBox, QTableWidget,
-    QTableWidgetItem, QHeaderView, QMessageBox, QLineEdit,
-    QSpinBox, QFormLayout, QGroupBox, QWidget, QApplication, QFileDialog
+    QTableWidgetItem, QHeaderView, QMessageBox, QLineEdit, QRadioButton,
+    QSpinBox, QFormLayout, QGroupBox, QWidget, QApplication, QTabWidget
 )
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QFont, QColor
@@ -15,9 +15,11 @@ from services.supplier_service import SupplierService
 from services.bank_account_service import BankAccountService
 from services.new_product_service import NewProductService
 from services.import_shipment_service import ImportShipmentService
+from services.cost_type_service import CostTypeService
 
 from .preview_dialog import ExcelPreviewDialog
 from .add_product_dialog import AddProductLineDialog
+from .cost_item_dialog import AddCostItemDialog
 
 import logging
 logger = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ class ImportShipmentDialog(QDialog):
         self.mode = mode          # 'create', 'edit', 'view'
         self.shipment_id = shipment_id
         self.product_service = NewProductService()
+        self.cost_type_service = CostTypeService()
         self._updating = False
 
         # Enable minimize and maximize buttons
@@ -55,9 +58,29 @@ class ImportShipmentDialog(QDialog):
         """Build the UI with a single tab."""
         main_layout = QVBoxLayout(self)
 
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #c0c8d0;
+                border-radius: 0px;
+                background: white;
+            }
+            QTabBar::tab {
+                background: #e6ecf2;
+                padding: 10px 20px;
+                margin-right: 2px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QTabBar::tab:selected {
+                background: white;
+                border-bottom: 2px solid #3498db;
+            }
+        """)
+
         # ----- Tab 1: Shipment Details -----
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab1 = QWidget()
+        layout = QVBoxLayout(tab1)
 
         # ---- Basic Information Section (MODERN) ----
         header_group = QGroupBox("Basic Information")
@@ -353,8 +376,12 @@ class ImportShipmentDialog(QDialog):
         btn_layout.addWidget(self.cancel_btn)
         layout.addLayout(btn_layout)
 
+        self.tabs.addTab(tab1, "📄 Shipment Details")
+
         # Add the tab to the main layout
-        main_layout.addWidget(tab)
+       
+        self.setup_tab2()
+        main_layout.addWidget(self.tabs)
 
         # If viewing, disable editing
         if self.mode == "view":
@@ -364,6 +391,358 @@ class ImportShipmentDialog(QDialog):
         self.populate_suppliers()
         self.populate_banks()
 
+    def setup_tab2(self):
+        self.tab2 = QWidget()
+        self.tabs.addTab(self.tab2, "💰 Costs & Allocation")
+        layout = QVBoxLayout(self.tab2)
+
+        # --- Cost Table ---
+        cost_group = QGroupBox("Additional Costs (Allocated By CBM)")
+        cost_layout = QVBoxLayout(cost_group)
+
+        self.cost_table = QTableWidget()
+        self.cost_table.setColumnCount(2)
+        self.cost_table.setHorizontalHeaderLabels(["Cost Type", "Amount (ETB)"])
+        self.cost_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.cost_table.setColumnWidth(1, 150)
+        self.cost_table.setAlternatingRowColors(True)
+        cost_layout.addWidget(self.cost_table)
+
+        # --- Cost toolbar ---
+        cost_btn_layout = QHBoxLayout()
+        self.add_cost_btn = QPushButton("➕ Add Cost")
+        self.add_cost_btn.setMinimumHeight(35)
+        self.add_cost_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #3498db, stop:1 #2980b9);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 15px;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2980b9, stop:1 #2471a3);
+            }
+        """)
+        self.add_cost_btn.clicked.connect(self.open_add_cost_dialog)
+
+        self.remove_cost_btn = QPushButton("🗑️ Remove Selected")
+        self.remove_cost_btn.setMinimumHeight(35)
+        self.remove_cost_btn.setEnabled(False)
+        self.remove_cost_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #e74c3c, stop:1 #c0392b);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 15px;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QPushButton:hover:enabled {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #c0392b, stop:1 #a93226);
+            }
+            QPushButton:disabled {
+                background: #bdc3c7;
+                color: #7f8c8d;
+            }
+        """)
+        self.remove_cost_btn.clicked.connect(self.remove_selected_cost)
+
+        cost_btn_layout.addWidget(self.add_cost_btn)
+        cost_btn_layout.addWidget(self.remove_cost_btn)
+        cost_btn_layout.addStretch()
+        cost_layout.addLayout(cost_btn_layout)
+
+        self.total_costs_label = QLabel("Total Additional Costs: ETB 0.00")
+        self.total_costs_label.setStyleSheet("font-weight: bold; color: #2c3e50; padding: 5px;")
+        cost_layout.addWidget(self.total_costs_label)
+
+        layout.addWidget(cost_group)
+
+        matrix_group = QGroupBox("Cost Allocation Breakdown (ETB)")
+        matrix_layout = QVBoxLayout(matrix_group)
+
+        self.alloc_table = QTableWidget()
+        self.alloc_table.setAlternatingRowColors(True)
+        matrix_layout.addWidget(self.alloc_table)
+
+        layout.addWidget(matrix_group)
+
+        # Connect cost table selection
+        self.cost_table.itemSelectionChanged.connect(self.on_cost_selection_changed)
+
+
+    def open_add_cost_dialog(self):
+        """Open the add cost item dialog."""
+        dialog = AddCostItemDialog(self.cost_type_service, self)
+        if dialog.exec() == QDialog.Accepted:
+            data = dialog.get_data()
+            self.add_cost_row(data)
+
+    def add_cost_row(self, data):
+        """Add a cost row to the cost table."""
+        row = self.cost_table.rowCount()
+        self.cost_table.insertRow(row)
+        
+        # Cost Type (store the ID for later)
+        cost_type_name = data["cost_type_name"]
+        cost_type_id = data["cost_type_id"]
+        item = QTableWidgetItem(cost_type_name)
+        item.setData(Qt.UserRole, cost_type_id)  # store ID
+        self.cost_table.setItem(row, 0, item)
+        
+        # Amount
+        amount_item = QTableWidgetItem(f"{data['amount']:,.2f}")
+        amount_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.cost_table.setItem(row, 1, amount_item)
+        
+        self.update_total_costs()
+        self.calculate_landed()
+
+
+
+    def remove_selected_cost(self):
+        """Remove the selected cost row."""
+        selected = self.cost_table.selectedItems()
+        if not selected:
+            return
+        
+        row = selected[0].row()
+        self.cost_table.removeRow(row)
+        self.update_total_costs()
+        self.calculate_landed()
+
+    def on_cost_selection_changed(self):
+        """Enable/disable remove cost button based on selection."""
+        selected = self.cost_table.selectedItems()
+        self.remove_cost_btn.setEnabled(len(selected) > 0)
+
+    def update_total_costs(self):
+        """Update the total costs label."""
+        total = 0.0
+        for row in range(self.cost_table.rowCount()):
+            amount_item = self.cost_table.item(row, 1)
+            if amount_item:
+                try:
+                    total += float(amount_item.text().replace(',', ''))
+                except ValueError:
+                    pass
+        self.total_costs_label.setText(f"Total Additional Costs: ETB {total:,.2f}")
+
+    def on_allocation_method_changed(self):
+        """Called when allocation method changes – recalculate."""
+        self.calculate_landed()
+
+    def calculate_landed(self):
+        """
+        Recalculate landed cost allocation and update the allocation matrix.
+        Allocates all costs by Total Used CBM.
+        """
+        print("=== calculate_landed called ===")
+
+        # --- Step 1: Extract product data from the main table ---
+        products = []
+        total_cbm_sum = 0.0
+        row_count = self.product_table.rowCount()
+        print(f"Product table row count: {row_count}")
+
+        for row in range(row_count):
+            print(f"--- Processing row {row} ---")
+
+            # Skip the summary row (if it exists)
+            if self.product_table.item(row, 0) and self.product_table.item(row, 0).text() == "TOTAL":
+                print(f"Row {row} is the TOTAL row, skipping")
+                continue
+
+            # Get product name from ModernLineEdit in column 1
+            name_widget = self.product_table.cellWidget(row, 1)
+            if isinstance(name_widget, ModernLineEdit):
+                product_name = name_widget.text().strip()
+                print(f"Product name from ModernLineEdit: '{product_name}'")
+            else:
+                name_item = self.product_table.item(row, 1)
+                if name_item:
+                    product_name = name_item.text().strip()
+                    print(f"Product name from QTableWidgetItem: '{product_name}'")
+                else:
+                    product_name = ""
+                    print("No product name widget or item found")
+
+            # If product name is empty, use item number from column 0
+            if not product_name:
+                item_number_item = self.product_table.item(row, 0)
+                if item_number_item:
+                    product_name = item_number_item.text().strip()
+                    print(f"Using item number as fallback: '{product_name}'")
+                else:
+                    product_name = f"Item {row+1}"
+                    print(f"Using generic fallback: '{product_name}'")
+
+            if not product_name:
+                print(f"Row {row} skipped – product name is empty")
+                continue
+
+            # Get numeric values
+            try:
+                cartons_item = self.product_table.item(row, 3)
+                qty_per_item = self.product_table.item(row, 4)
+                price_item = self.product_table.item(row, 6)
+                cbm_item = self.product_table.item(row, 8)
+
+                print(f"  Cartons item: {cartons_item}, text: {cartons_item.text() if cartons_item else 'None'}")
+                print(f"  Qty/Carton item: {qty_per_item}, text: {qty_per_item.text() if qty_per_item else 'None'}")
+                print(f"  Price item: {price_item}, text: {price_item.text() if price_item else 'None'}")
+                print(f"  CBM item: {cbm_item}, text: {cbm_item.text() if cbm_item else 'None'}")
+
+                cartons = float(cartons_item.text() or 0) if cartons_item else 0
+                qty_per = float(qty_per_item.text() or 0) if qty_per_item else 0
+                unit_price_rmb = float(price_item.text().replace(',', '') or 0) if price_item else 0
+                cbm_per = float(cbm_item.text() or 0) if cbm_item else 0
+
+                print(f"  Parsed values: cartons={cartons}, qty_per={qty_per}, unit_price={unit_price_rmb}, cbm_per={cbm_per}")
+
+            except (ValueError, AttributeError) as e:
+                print(f"  Error parsing row {row}: {e}")
+                continue
+
+            if cartons <= 0 or qty_per <= 0:
+                print(f"  Row {row} skipped – cartons or qty_per <= 0")
+                continue
+
+            total_quantity = cartons * qty_per
+            total_cbm = cartons * cbm_per
+            total_cbm_sum += total_cbm
+
+            print(f"  Added product: {product_name}, total_cbm: {total_cbm}")
+
+            products.append({
+                "name": product_name,
+                "cartons": cartons,
+                "qty_per": qty_per,
+                "total_quantity": total_quantity,
+                "unit_price_rmb": unit_price_rmb,
+                "cbm_per": cbm_per,
+                "total_cbm": total_cbm,
+            })
+
+        # --- Step 2: Extract cost data from the cost table ---
+        costs = []
+        cost_row_count = self.cost_table.rowCount()
+        print(f"Cost table row count: {cost_row_count}")
+
+        for row in range(cost_row_count):
+            cost_type_item = self.cost_table.item(row, 0)
+            amount_item = self.cost_table.item(row, 1)
+            print(f"  Row {row}: cost_type={cost_type_item.text() if cost_type_item else 'None'}, amount={amount_item.text() if amount_item else 'None'}")
+            if not cost_type_item or not amount_item:
+                continue
+            cost_type = cost_type_item.text()
+            try:
+                amount = float(amount_item.text().replace(',', ''))
+            except ValueError:
+                continue
+            costs.append({"type": cost_type, "amount": amount})
+
+        print(f"Products found: {len(products)}")
+        print(f"Total CBM sum: {total_cbm_sum}")
+        print(f"Costs found: {len(costs)}")
+
+        # --- Step 3: If no products or no costs, clear the allocation table ---
+        if not products or not costs or total_cbm_sum == 0:
+            self.alloc_table.setRowCount(0)
+            self.alloc_table.setColumnCount(0)
+            print("Allocation table cleared (no products, no costs, or total CBM = 0)")
+            return
+
+        # --- Step 4: Allocate each cost across products ---
+        # For each product, we store allocations per cost and a running total
+        product_allocations = []  # list of dicts {product_name, allocations: list per cost, total_alloc}
+        for prod in products:
+            allocs = []
+            for cost in costs:
+                allocated = (cost["amount"] / total_cbm_sum) * prod["total_cbm"]
+                allocs.append(allocated)
+            product_allocations.append({
+                "name": prod["name"],
+                "allocations": allocs,
+                "total_alloc": sum(allocs)
+            })
+
+        # --- Step 5: Build the allocation matrix ---
+        n_products = len(products)
+        n_costs = len(costs)
+
+        self.alloc_table.setRowCount(n_products + 1)  # +1 for total row
+        self.alloc_table.setColumnCount(n_costs + 2)  # +1 for product name, +1 for total column
+
+        # Set headers
+        headers = ["Product"] + [c["type"] for c in costs] + ["Total (ETB)"]
+        self.alloc_table.setHorizontalHeaderLabels(headers)
+        self.alloc_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
+        # Fill product rows
+        for i, prod_alloc in enumerate(product_allocations):
+            # Product name
+            self.alloc_table.setItem(i, 0, QTableWidgetItem(prod_alloc["name"]))
+
+            # Allocations per cost
+            row_total = 0.0
+            for j, alloc in enumerate(prod_alloc["allocations"]):
+                item = QTableWidgetItem(f"{alloc:,.2f}")
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.alloc_table.setItem(i, j + 1, item)
+                row_total += alloc
+
+            # Total per product (last column)
+            total_item = QTableWidgetItem(f"{row_total:,.2f}")
+            total_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            total_item.setBackground(QColor("#d4edda"))
+            font = total_item.font()
+            font.setBold(True)
+            total_item.setFont(font)
+            self.alloc_table.setItem(i, n_costs + 1, total_item)
+
+        # --- Step 6: Total row (per cost) ---
+        total_row = n_products
+        label_item = QTableWidgetItem("TOTAL")
+        label_item.setBackground(QColor("#cce5ff"))
+        font = label_item.font()
+        font.setBold(True)
+        label_item.setFont(font)
+        self.alloc_table.setItem(total_row, 0, label_item)
+
+        grand_total = 0.0
+        for j in range(n_costs):
+            col_sum = sum(prod_alloc["allocations"][j] for prod_alloc in product_allocations)
+            item = QTableWidgetItem(f"{col_sum:,.2f}")
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            item.setBackground(QColor("#cce5ff"))
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+            self.alloc_table.setItem(total_row, j + 1, item)
+            grand_total += col_sum
+
+        # Grand total cell (last column)
+        grand_item = QTableWidgetItem(f"{grand_total:,.2f}")
+        grand_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        grand_item.setBackground(QColor("#b8daff"))
+        font = grand_item.font()
+        font.setBold(True)
+        grand_item.setFont(font)
+        self.alloc_table.setItem(total_row, n_costs + 1, grand_item)
+
+        # Adjust row heights
+        self.alloc_table.verticalHeader().setDefaultSectionSize(40)
+        self.alloc_table.setAlternatingRowColors(True)
+        
     def clear_all_rows(self):
         """Clear all product rows from the table after confirmation."""
         row_count = self.product_table.rowCount()
@@ -580,6 +959,7 @@ class ImportShipmentDialog(QDialog):
         self.product_table.blockSignals(False)
         self.update_table_summary()
         self.update_total_display()
+        self.calculate_landed()
 
     def remove_selected_product(self):
         """Remove the currently selected product row from the table."""
@@ -592,6 +972,7 @@ class ImportShipmentDialog(QDialog):
         self.product_table.removeRow(row)
         self.update_table_summary()
         self.update_total_display()
+        self.calculate_landed()
 
         # If no rows left, add an empty row so the user can add more
         if self.product_table.rowCount() == 0:
@@ -657,7 +1038,7 @@ class ImportShipmentDialog(QDialog):
             self._updating = False
         self.update_table_summary()
         self.update_total_display()
-
+        self.calculate_landed()
     # ------------------------------------------------------------------
     # Excel Import
     # ------------------------------------------------------------------
@@ -936,16 +1317,22 @@ class ImportShipmentDialog(QDialog):
             if self.product_table.item(row, 0) and self.product_table.item(row, 0).text() == "TOTAL":
                 continue
 
+            # Get Item # (column 0)
+            item_number = self.product_table.item(row, 0).text().strip() if self.product_table.item(row, 0) else ""
+
             # Get product name from ModernLineEdit in column 1
             name_widget = self.product_table.cellWidget(row, 1)
             if isinstance(name_widget, ModernLineEdit):
                 product_name = name_widget.text().strip()
             else:
-                # Fallback: try QTableWidgetItem
                 name_item = self.product_table.item(row, 1)
                 product_name = name_item.text().strip() if name_item else ""
 
-            # Skip if no product name or name is empty
+            # If product name is empty, use item number as fallback
+            if not product_name:
+                product_name = item_number
+
+            # Skip if still empty (shouldn't happen now)
             if not product_name:
                 continue
 
@@ -955,9 +1342,6 @@ class ImportShipmentDialog(QDialog):
                 unit = unit_combo.currentText().strip()
             else:
                 unit = "pcs"
-
-            # Get Item # (column 0)
-            item_number = self.product_table.item(row, 0).text().strip() if self.product_table.item(row, 0) else ""
 
             # Get numeric values
             try:
