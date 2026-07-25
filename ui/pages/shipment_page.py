@@ -135,36 +135,34 @@ class ImportShipmentPage(QWidget):
             "ID", "Supplier", "Bank", "Date", "Exchange Rate",
             "FOB (ETB)", "Total Landed (ETB)", "Status"
         ])
+        font = QFont()
+        font.setPointSize(16)      # Larger font size
+        font.setBold(True)         # Bold text
+        table.setFont(font)
 
         # Set column widths
-        table.setColumnWidth(0, 60)   # ID
-        table.setColumnWidth(1, 200)  # Supplier
-        table.setColumnWidth(2, 200)  # Bank
-        table.setColumnWidth(3, 120)  # Date
-        table.setColumnWidth(4, 100)  # Exchange Rate
-        table.setColumnWidth(5, 150)  # FOB
-        table.setColumnWidth(6, 150)  # Total Landed
-        table.setColumnWidth(7, 120)  # Status
+        table.setColumnWidth(0, 80)   # ID
+        table.setColumnWidth(1, 220)  # Supplier
+        table.setColumnWidth(2, 220)  # Bank
+        table.setColumnWidth(3, 140)  # Date
+        table.setColumnWidth(4, 120)  # Exchange Rate
+        table.setColumnWidth(5, 160)  # FOB
+        table.setColumnWidth(6, 160)  # Total Landed
+        table.setColumnWidth(7, 140)  # Status
 
         # Style
         table.setStyleSheet("""
             QTableWidget {
-                gridline-color: #d0d8e0;
-                font-size: 13px;
+                font-size: 16px;
+                font-weight: bold;
             }
             QTableWidget::item {
-                padding: 8px;
-            }
-            QTableWidget::item:selected {
-                background-color: #d9e8f7;
+                padding: 10px;
             }
             QHeaderView::section {
-                background-color: #e6ecf2;
-                padding: 6px;
-                border: none;
-                border-bottom: 2px solid #c0c8d0;
+                font-size: 16px;
                 font-weight: bold;
-                font-size: 13px;
+                padding: 8px;
             }
         """)
 
@@ -180,7 +178,13 @@ class ImportShipmentPage(QWidget):
         return table
 
     def open_new_shipment_dialog(self):
-        pass
+        from ui.pages.import_shipment_dialog import ImportShipmentDialog
+        dialog = ImportShipmentDialog(
+            parent=self,
+            current_user=self.current_user,
+            mode="create"
+        )
+        dialog.exec()
 
     def refresh(self):
         pass
