@@ -5,6 +5,7 @@ from typing import List, Optional
 from models.import_shipments import ImportShipment, ShipmentStatusEnum
 from models.shipment_products import ShipmentProduct
 from services.base_service import BaseService, get_session
+from models.shipment_costs import ShipmentCost
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class ImportShipmentService(BaseService):
             session.add(shipment)
             session.flush()
 
+            # Save products
             for prod in data['products']:
                 if prod.get('cartons', 0) <= 0 or prod.get('qty_per_carton', 0) <= 0:
                     continue
@@ -50,6 +52,20 @@ class ImportShipmentService(BaseService):
                     total_cbm=total_cbm
                 )
                 session.add(product)
+
+            # Save costs (NEW)
+            costs = data.get('costs', [])
+            for cost in costs:
+                cost_type_id = cost.get('cost_type_id')
+                amount = cost.get('amount')
+                if cost_type_id and amount is not None:
+                    shipment_cost = ShipmentCost(
+                        shipment_id=shipment.id,
+                        cost_type_id=cost_type_id,
+                        amount=amount
+                    )
+                    session.add(shipment_cost)
+
             session.commit()
-            logger.info(f"Created shipment #{shipment.id} with {len(data['products'])} products")
+            logger.info(f"Created shipment #{shipment.id} with {len(data['products'])} products and {len(costs)} costs")
             return shipment
