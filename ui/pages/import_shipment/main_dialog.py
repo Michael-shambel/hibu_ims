@@ -67,7 +67,14 @@ class ImportShipmentDialog(
         screen_geometry = QApplication.primaryScreen().availableGeometry()
         self.setGeometry(screen_geometry)
 
-        self.init_ui()  
+        self.init_ui()
+        self.populate_suppliers()
+        self.populate_banks()
+
+        if shipment_id:
+            self.load_shipment(shipment_id)
+        else:
+            self.calculate_landed()
 
     def init_ui(self):
         """Build the UI with three tabs and universal bottom buttons."""
@@ -321,42 +328,36 @@ class ImportShipmentDialog(
             )
 
     def save_shipment(self):
-        """Validate and save the shipment as DRAFT."""
-        # Validate supplier
+        """Validate and save the shipment (create or update)."""
+        # Validate fields (unchanged)
         supplier_id = self.supplier_combo.currentData()
         if not supplier_id:
             QMessageBox.warning(self, "Validation", "Please select a supplier.")
             return
 
-        # Validate bank
         bank_id = self.bank_combo.currentData()
         if not bank_id:
             QMessageBox.warning(self, "Validation", "Please select a bank account.")
             return
 
-        # Validate exchange rate
         exchange_rate = self.rate_spin.spin_box.value()
         if exchange_rate <= 0:
             QMessageBox.warning(self, "Validation", "Exchange rate must be greater than 0.")
             return
 
-        # Get user ID
         user_id = self.get_user_id()
         if not user_id:
             QMessageBox.warning(self, "Validation", "User not identified. Please log in again.")
             return
 
-        # Get products
         products = self.get_products_from_table()
         if not products:
             QMessageBox.warning(self, "Validation", "Please add at least one product.")
             return
 
-        # Get costs
         costs = self.get_costs_from_table()
         target_margin = self.target_margin_spin.value()
 
-        # Build data dict
         data = {
             "supplier_id": supplier_id,
             "bank_account_id": bank_id,
@@ -364,21 +365,24 @@ class ImportShipmentDialog(
             "exchange_rate": exchange_rate,
             "created_by_user_id": user_id,
             "products": products,
-            "costs": costs,   # <-- NEW
+            "costs": costs,
             "target_margin": target_margin
         }
 
-        # Save via service
         try:
             service = ImportShipmentService()
-            shipment = service.create_shipment(data)
+            if self.shipment_id:
+                # Update existing shipment
+                shipment = service.update_shipment(self.shipment_id, data)
+                msg = f"Shipment #{shipment.id} updated."
+            else:
+                # Create new shipment
+                shipment = service.create_shipment(data)
+                msg = f"Shipment #{shipment.id} saved as DRAFT."
+
             if shipment:
-                QMessageBox.information(
-                    self,
-                    "Success",
-                    f"Shipment #{shipment.id} saved as DRAFT."
-                )
-                self.accept()  # close dialog
+                QMessageBox.information(self, "Success", msg)
+                self.accept()
             else:
                 QMessageBox.critical(self, "Error", "Failed to save shipment.")
         except Exception as e:
@@ -395,9 +399,89 @@ class ImportShipmentDialog(
             widget.setEnabled(not enabled)
         for widget in self.findChildren(QSpinBox):
             widget.setEnabled(not enabled)
+
+        # Disable buttons (except cancel?)
         for widget in self.findChildren(QPushButton):
+            # Keep Cancel always enabled, but hide Save in view mode
+            if widget is self.cancel_btn:
+                continue
             widget.setEnabled(not enabled)
+
+        # Product table: disable editing and cell widgets
         self.product_table.setEditTriggers(
             QTableWidget.NoEditTriggers if enabled else QTableWidget.DoubleClicked
         )
+        for row in range(self.product_table.rowCount()):
+            # Disable the name line edit (column 1)
+            name_widget = self.product_table.cellWidget(row, 1)
+            if name_widget and isinstance(name_widget, ModernLineEdit):
+                name_widget.setEnabled(not enabled)
+            # Disable the unit combo (column 2)
+            unit_widget = self.product_table.cellWidget(row, 2)
+            if unit_widget and isinstance(unit_widget, QComboBox):
+                unit_widget.setEnabled(not enabled)
+
+        # Cost table: disable editing
+        self.cost_table.setEditTriggers(
+            QTableWidget.NoEditTriggers if enabled else QTableWidget.DoubleClicked
+        )
+
+        # Hide Save button in view mode
         self.save_btn.setVisible(not enabled)
+
+    def load_shipment(self, shipment_id):
+        """Load an existing shipment into the UI."""
+        service = ImportShipmentService()
+        shipment = service.get_by_id_with_relations(shipment_id)
+        if not shipment:
+            QMessageBox.critical(self, "Error", f"Shipment #{shipment_id} not found.")
+            self.reject()
+            return
+
+        # Set basic info
+        self.supplier_combo.setCurrentIndex(self.supplier_combo.findData(shipment.supplier_id))
+        self.bank_combo.setCurrentIndex(self.bank_combo.findData(shipment.bank_account_id))
+        # Convert Python date to QDate
+        from PySide6.QtCore import QDate
+        self.date_edit.setDate(QDate(shipment.proforma_date.year, shipment.proforma_date.month, shipment.proforma_date.day))
+        self.rate_spin.spin_box.setValue(shipment.exchange_rate)
+        self.target_margin_spin.setValue(shipment.target_margin or 20.0)
+
+        # Clear any existing rows (should be empty for new, but safe)
+        self.product_table.setRowCount(0)
+        # Add products
+        for product in shipment.products:
+            if not product.is_deleted:
+                data = {
+                    "item_number": product.item_number,
+                    "product_name": product.product_name,
+                    "unit": product.unit,
+                    "cartons": product.cartons,
+                    "qty_per_carton": product.qty_per_carton,
+                    "unit_price_rmb": product.unit_price_rmb,
+                    "cbm_per_carton": product.cbm_per_carton,
+                }
+                self.add_product_row_to_table(data)
+
+        # Clear costs and add
+        self.cost_table.setRowCount(0)
+        for cost in shipment.costs:
+            if not cost.is_deleted:
+                data = {
+                    "cost_type_id": cost.cost_type_id,
+                    "cost_type_name": cost.cost_type.name if cost.cost_type else "Unknown",
+                    "amount": cost.amount,
+                }
+                self.add_cost_row(data)
+
+        # Determine mode based on status
+        if shipment.status.value == "approved":
+            self.mode = "view"
+            self.set_read_only(True)
+        elif self.mode == "view":
+            self.set_read_only(True)
+        else:
+            self.set_read_only(False)
+
+        # Recalculate all tabs
+        self.calculate_landed()

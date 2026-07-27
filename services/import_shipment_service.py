@@ -98,3 +98,77 @@ class ImportShipmentService(BaseService):
             shipment.is_deleted = True
             session.commit()
             return True
+
+    def get_by_id_with_relations(self, shipment_id: int):
+        """Fetch a shipment with all relationships for editing/viewing."""
+        with get_session() as session:
+            return session.query(self.model).options(
+                joinedload(ImportShipment.supplier),
+                joinedload(ImportShipment.bank_account),
+                joinedload(ImportShipment.products),
+                joinedload(ImportShipment.costs).joinedload(ShipmentCost.cost_type)
+            ).filter(
+                self.model.id == shipment_id,
+                self.model.is_deleted == False
+            ).first()
+
+    def update_shipment(self, shipment_id: int, data: dict):
+        """Update an existing draft shipment (replace products and costs)."""
+        with get_session() as session:
+            shipment = session.query(self.model).filter(
+                self.model.id == shipment_id,
+                self.model.is_deleted == False
+            ).first()
+            if not shipment:
+                raise ValueError("Shipment not found")
+            if shipment.status != ShipmentStatusEnum.DRAFT:
+                raise ValueError("Only DRAFT shipments can be edited")
+
+            # Update basic fields
+            shipment.supplier_id = data['supplier_id']
+            shipment.bank_account_id = data['bank_account_id']
+            shipment.proforma_date = data['proforma_date']
+            shipment.exchange_rate = float(data['exchange_rate'])
+            shipment.target_margin = data.get('target_margin', 20.0)
+
+            for prod in shipment.products:
+                session.delete(prod)
+            for cost in shipment.costs:
+                session.delete(cost)
+
+            # Add new products
+            for prod in data['products']:
+                if prod.get('cartons', 0) <= 0 or prod.get('qty_per_carton', 0) <= 0:
+                    continue
+                total_qty = prod['cartons'] * prod['qty_per_carton']
+                total_cbm = prod['cartons'] * prod.get('cbm_per_carton', 0.0)
+                product = ShipmentProduct(
+                    shipment_id=shipment.id,
+                    item_number=prod.get('item_number'),
+                    product_name=prod['product_name'],
+                    unit=prod['unit'],
+                    cartons=prod['cartons'],
+                    qty_per_carton=prod['qty_per_carton'],
+                    total_quantity=total_qty,
+                    unit_price_rmb=prod['unit_price_rmb'],
+                    cbm_per_carton=prod.get('cbm_per_carton', 0.0),
+                    total_cbm=total_cbm,
+                    market_price=prod.get('market_price', 0.0),
+                )
+                session.add(product)
+
+            # Add new costs
+            for cost in data.get('costs', []):
+                cost_type_id = cost.get('cost_type_id')
+                amount = cost.get('amount')
+                if cost_type_id and amount is not None:
+                    shipment_cost = ShipmentCost(
+                        shipment_id=shipment.id,
+                        cost_type_id=cost_type_id,
+                        amount=amount
+                    )
+                    session.add(shipment_cost)
+
+            session.commit()
+            logger.info(f"Updated shipment #{shipment.id}")
+            return shipment
