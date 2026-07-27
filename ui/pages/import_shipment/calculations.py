@@ -13,11 +13,6 @@ class CalculationsMixin:
     """Contains calculate_landed and related helpers."""
 
     def calculate_landed(self):
-        """
-        Recalculate landed cost allocation and update:
-        - Tab 2: allocation matrix
-        - Tab 3: landed table, grand total, and pricing columns
-        """
         # --- Step 1: Extract product data from the main table ---
         products = []
         total_cbm_sum = 0.0
@@ -220,8 +215,56 @@ class CalculationsMixin:
         # Grand total
         self.grand_total_label.setText(f"Grand Total Landed Cost (ETB): {grand_total_etb:,.2f}")
 
+        self.update_landed_table()
+
         # --- Step 7: Calculate pricing columns (selling price & implied margin) ---
         self.calculate_selling_prices()
         self.calculate_implied_margins()
 
         self.update_profit_summary()
+        self.apply_landed_table_styling() 
+
+    def apply_landed_table_styling(self):
+        """Apply visual styling to important columns in the landed table."""
+        if not self.landed_results:
+            return
+
+        # Columns to highlight: Total Cost (6), Landed Unit (7), Selling Price (8), Market Price (9), Implied Margin (10)
+        important_cols = [6, 7, 8, 9, 10]
+
+        for row in range(self.landed_table.rowCount()):
+            for col in important_cols:
+                item = self.landed_table.item(row, col)
+                if not item:
+                    continue
+
+                # Bold font
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+
+                # Background colours
+                if col == 6:          # Total Cost
+                    item.setBackground(QColor(240, 240, 240))   # light grey
+                elif col == 7:        # Landed Unit
+                    item.setBackground(QColor(255, 255, 200))   # light yellow
+                elif col == 8:        # Selling Price
+                    item.setBackground(QColor(200, 230, 255))   # light blue
+                elif col == 9:        # Market Price
+                    item.setBackground(QColor(230, 230, 255))   # light purple
+                elif col == 10:       # Implied Margin
+                    try:
+                        # Remove '%' and commas, then convert to float
+                        val_str = item.text().replace('%', '').replace(',', '').strip()
+                        val = float(val_str) if val_str else 0.0
+                    except ValueError:
+                        val = 0.0
+                    if val < 0:
+                        item.setBackground(QColor(255, 200, 200))   # redish
+                    elif val > 0:
+                        item.setBackground(QColor(200, 255, 200))   # greenish
+                    else:
+                        item.setBackground(QColor(240, 240, 240))   # neutral
+
+                # Right-align numeric values
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)

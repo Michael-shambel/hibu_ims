@@ -136,6 +136,7 @@ class Tab3SetupMixin:
         self.calculate_selling_prices()
         self.calculate_implied_margins()
         self.update_profit_summary()
+        self.apply_landed_table_styling()
 
     def update_landed_table(self):
         """Update the landed unit column."""
@@ -196,6 +197,7 @@ class Tab3SetupMixin:
         """When Market Price (col 8) is edited, recalculate Implied Margin (col 9)."""
         if col == 9:
             self.calculate_implied_margins()
+            self.apply_landed_table_styling()
 
     def set_market_price_for_all(self, price):
         """Set the same market price for all products (helper method)."""
