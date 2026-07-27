@@ -19,6 +19,7 @@ class ImportShipment(BaseModel):
     exchange_rate = Column(Float, nullable=False)
     status = Column(SQLEnum(ShipmentStatusEnum), nullable=False, default=ShipmentStatusEnum.DRAFT)
     created_by_user_id = Column(Integer, ForeignKey("auth_users.id"), nullable=False)
+    target_margin = Column(Float, nullable=True, default=20.0)
 
 
     supplier = relationship("Supplier", foreign_keys=[supplier_id])

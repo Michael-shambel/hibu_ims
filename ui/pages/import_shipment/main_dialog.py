@@ -354,6 +354,7 @@ class ImportShipmentDialog(
 
         # Get costs
         costs = self.get_costs_from_table()
+        target_margin = self.target_margin_spin.value()
 
         # Build data dict
         data = {
@@ -364,6 +365,7 @@ class ImportShipmentDialog(
             "created_by_user_id": user_id,
             "products": products,
             "costs": costs,   # <-- NEW
+            "target_margin": target_margin
         }
 
         # Save via service

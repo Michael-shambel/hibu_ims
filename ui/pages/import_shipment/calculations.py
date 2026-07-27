@@ -67,7 +67,7 @@ class CalculationsMixin:
             products.append({
                 "name": product_name,
                 "cartons": cartons,
-                "qty_per": qty_per,
+                "qty_per": qty_per,                     # <-- keep this
                 "total_quantity": total_quantity,
                 "unit_price_rmb": unit_price_rmb,
                 "cbm_per": cbm_per,
@@ -88,7 +88,6 @@ class CalculationsMixin:
                 continue
             costs.append({"type": cost_type, "amount": amount})
 
-        # Store products for margin combo (unused now but kept for compatibility)
         self.products_data = products
 
         # --- Step 3: If no products or no costs, clear tables ---
@@ -122,6 +121,7 @@ class CalculationsMixin:
             landed_results.append({
                 "name": prod["name"],
                 "cartons": prod["cartons"],
+                "qty_per_carton": prod["qty_per"],               # <-- NEW FIELD
                 "total_quantity": prod["total_quantity"],
                 "fob_etb": prod["total_quantity"] * prod["unit_price_rmb"] * self.rate_spin.spin_box.value(),
                 "allocated": total_alloc,
@@ -134,6 +134,7 @@ class CalculationsMixin:
         self.landed_results = landed_results
 
         # --- Step 5: Update allocation matrix (Tab 2) ---
+        # (unchanged, omitted for brevity – keep your existing code here)
         n_products = len(products)
         n_costs = len(costs)
         self.alloc_table.setRowCount(n_products + 1)
@@ -189,26 +190,32 @@ class CalculationsMixin:
         self.alloc_table.verticalHeader().setDefaultSectionSize(40)
         self.alloc_table.setAlternatingRowColors(True)
 
-        # --- Step 6: Update landed table (Tab 3) ---
+        # --- Step 6: Update landed table (Tab 3) with new Qty/Carton column ---
         self.landed_table.setRowCount(len(landed_results))
         for i, res in enumerate(landed_results):
+            # Col 0: Product
             self.landed_table.setItem(i, 0, QTableWidgetItem(res["name"]))
+            # Col 1: Cartons
             self.landed_table.setItem(i, 1, QTableWidgetItem(str(res["cartons"])))
-            self.landed_table.setItem(i, 2, QTableWidgetItem(str(res["total_quantity"])))
-            self.landed_table.setItem(i, 3, QTableWidgetItem(f"{res['fob_etb']:,.2f}"))
-            self.landed_table.setItem(i, 4, QTableWidgetItem(f"{res['allocated']:,.2f}"))
-            self.landed_table.setItem(i, 5, QTableWidgetItem(f"{res['total_cost']:,.2f}"))
+            # Col 2: Qty/Carton (NEW)
+            self.landed_table.setItem(i, 2, QTableWidgetItem(str(res["qty_per_carton"])))
+            # Col 3: Total Qty
+            self.landed_table.setItem(i, 3, QTableWidgetItem(str(res["total_quantity"])))
+            # Col 4: FOB (ETB)
+            self.landed_table.setItem(i, 4, QTableWidgetItem(f"{res['fob_etb']:,.2f}"))
+            # Col 5: Allocation (ETB)
+            self.landed_table.setItem(i, 5, QTableWidgetItem(f"{res['allocated']:,.2f}"))
+            # Col 6: Total Cost (ETB)
+            self.landed_table.setItem(i, 6, QTableWidgetItem(f"{res['total_cost']:,.2f}"))
+            # Col 7: Landed Unit (handled by update_landed_table)
+            # Col 8: Selling Price (handled by calculate_selling_prices)
+            # Col 9: Market Price – default 0.00
+            self.landed_table.setItem(i, 9, QTableWidgetItem("0.00"))
+            # Col 10: Implied Margin (handled by calculate_implied_margins)
 
-            landed_unit = res['landed_qty'] if self.current_basis == "qty" else res['landed_carton']
-            self.landed_table.setItem(i, 6, QTableWidgetItem(f"{landed_unit:,.2f}"))
-
-            # Set initial Market Price to 0.00 (user will edit)
-            self.landed_table.setItem(i, 8, QTableWidgetItem("0.00"))
-            # Selling Price and Implied Margin will be calculated below
-
-        # Update header of landed unit column
+        # Update header of landed unit column (col 7)
         basis_label = "Landed Unit (per Qty)" if self.current_basis == "qty" else "Landed Unit (per Carton)"
-        self.landed_table.setHorizontalHeaderItem(6, QTableWidgetItem(basis_label))
+        self.landed_table.setHorizontalHeaderItem(7, QTableWidgetItem(basis_label))
 
         # Grand total
         self.grand_total_label.setText(f"Grand Total Landed Cost (ETB): {grand_total_etb:,.2f}")

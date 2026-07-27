@@ -1,13 +1,21 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit, QComboBox, QDateEdit, QCheckBox
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
+    QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox
 )
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QColor
+
+from services.import_shipment_service import ImportShipmentService
+from ui.pages.import_shipment import ImportShipmentDialog
+
 
 class ImportShipmentPage(QWidget):
     def __init__(self, current_user=None):
         super().__init__()
         self.current_user = current_user
+        self.service = ImportShipmentService()
         self.init_ui()
+        self.refresh()
 
     def init_ui(self):
         """Initialize the modern UI."""
@@ -128,7 +136,9 @@ class ImportShipmentPage(QWidget):
 
         # Connect selection signal for delete button
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
+
     def create_shipment_table(self):
+        """Create the shipment table."""
         table = QTableWidget()
         table.setColumnCount(8)
         table.setHorizontalHeaderLabels([
@@ -136,36 +146,40 @@ class ImportShipmentPage(QWidget):
             "FOB (ETB)", "Total Landed (ETB)", "Status"
         ])
         font = QFont()
-        font.setPointSize(16)      # Larger font size
-        font.setBold(True)         # Bold text
+        font.setPointSize(14)
+        font.setBold(True)
         table.setFont(font)
 
         # Set column widths
-        table.setColumnWidth(0, 80)   # ID
-        table.setColumnWidth(1, 220)  # Supplier
-        table.setColumnWidth(2, 220)  # Bank
-        table.setColumnWidth(3, 140)  # Date
-        table.setColumnWidth(4, 120)  # Exchange Rate
-        table.setColumnWidth(5, 160)  # FOB
-        table.setColumnWidth(6, 160)  # Total Landed
-        table.setColumnWidth(7, 140)  # Status
+        table.setColumnWidth(0, 70)
+        table.setColumnWidth(1, 200)
+        table.setColumnWidth(2, 200)
+        table.setColumnWidth(3, 120)
+        table.setColumnWidth(4, 110)
+        table.setColumnWidth(5, 150)
+        table.setColumnWidth(6, 150)
+        table.setColumnWidth(7, 120)
 
         # Style
         table.setStyleSheet("""
             QTableWidget {
-                font-size: 16px;
-                font-weight: bold;
+                gridline-color: #d0d8e0;
             }
             QTableWidget::item {
                 padding: 10px;
             }
+            QTableWidget::item:selected {
+                background-color: #d9e8f7;
+            }
             QHeaderView::section {
-                font-size: 16px;
-                font-weight: bold;
+                background-color: #e6ecf2;
                 padding: 8px;
+                border: none;
+                border-bottom: 2px solid #c0c8d0;
+                font-weight: bold;
+                font-size: 14px;
             }
         """)
-
         table.setAlternatingRowColors(True)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -173,30 +187,187 @@ class ImportShipmentPage(QWidget):
         table.setSelectionMode(QTableWidget.SingleSelection)
         table.setSortingEnabled(True)
 
+        # Double-click to edit/view
         table.doubleClicked.connect(self.on_table_double_clicked)
 
         return table
 
+    # ------------------------------------------------------------------
+    # Data Loading
+    # ------------------------------------------------------------------
+    def refresh(self):
+        """Refresh the shipment list from database."""
+        self.status_label.setText("Loading...")
+        self.status_label.setStyleSheet("color: #f39c12; font-size: 12px;")
+
+        try:
+            shipments = self.service.get_all()
+            self.table.setRowCount(0)
+
+            if not shipments:
+                self.stats_label.setText("Total: 0 shipments")
+                self.status_label.setText("Ready")
+                self.status_label.setStyleSheet("color: #bdc3c7; font-size: 12px;")
+                return
+
+            self.table.setRowCount(len(shipments))
+            total_fob = 0.0
+            total_landed = 0.0
+            draft_count = 0
+            approved_count = 0
+
+            for row, shipment in enumerate(shipments):
+                # Calculate FOB and Total Landed
+                fob_total = 0.0
+                for product in shipment.products:
+                    if not product.is_deleted:
+                        fob_total += product.total_quantity * product.unit_price_rmb * shipment.exchange_rate
+
+                total_costs = sum(c.amount for c in shipment.costs if not c.is_deleted)
+                total_landed_shipment = fob_total + total_costs
+
+                # ID
+                id_item = QTableWidgetItem(str(shipment.id))
+                id_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, 0, id_item)
+
+                # Supplier
+                supplier_name = shipment.supplier.supplier_name if shipment.supplier else "N/A"
+                self.table.setItem(row, 1, QTableWidgetItem(supplier_name))
+
+                # Bank
+                bank_name = shipment.bank_account.account_name if shipment.bank_account else "N/A"
+                self.table.setItem(row, 2, QTableWidgetItem(bank_name))
+
+                # Date
+                date_str = shipment.proforma_date.strftime("%d/%m/%Y") if shipment.proforma_date else "N/A"
+                date_item = QTableWidgetItem(date_str)
+                date_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, 3, date_item)
+
+                # Exchange Rate
+                rate_item = QTableWidgetItem(f"{shipment.exchange_rate:.4f}")
+                rate_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, 4, rate_item)
+
+                # FOB (ETB)
+                fob_item = QTableWidgetItem(f"{fob_total:,.2f}")
+                fob_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(row, 5, fob_item)
+
+                # Total Landed (ETB)
+                landed_item = QTableWidgetItem(f"{total_landed_shipment:,.2f}")
+                landed_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(row, 6, landed_item)
+
+                # Status
+                status_text = shipment.status.value.title() if shipment.status else "Draft"
+                status_item = QTableWidgetItem(status_text)
+                status_item.setTextAlignment(Qt.AlignCenter)
+
+                if shipment.status and shipment.status.value == "approved":
+                    status_item.setBackground(QColor(200, 255, 200))
+                    status_item.setForeground(QColor(0, 150, 0))
+                    approved_count += 1
+                elif shipment.status and shipment.status.value == "cancelled":
+                    status_item.setBackground(QColor(255, 200, 200))
+                    status_item.setForeground(QColor(200, 0, 0))
+                else:
+                    status_item.setBackground(QColor(255, 255, 200))
+                    status_item.setForeground(QColor(150, 150, 0))
+                    draft_count += 1
+
+                status_item.setFont(QFont("Segoe UI", 11, QFont.Bold))
+                self.table.setItem(row, 7, status_item)
+
+                # Store shipment ID for later use
+                self.table.item(row, 0).setData(Qt.UserRole, shipment.id)
+
+                total_fob += fob_total
+                total_landed += total_landed_shipment
+
+            self.stats_label.setText(
+                f"Total: {len(shipments)} shipments  |  Draft: {draft_count}  |  Approved: {approved_count}  |  "
+                f"Total FOB: {total_fob:,.2f} ETB  |  Total Landed: {total_landed:,.2f} ETB"
+            )
+            self.status_label.setText("Ready")
+            self.status_label.setStyleSheet("color: #bdc3c7; font-size: 12px;")
+
+        except Exception as e:
+            self.status_label.setText(f"❌ Error: {str(e)}")
+            self.status_label.setStyleSheet("color: #e74c3c; font-size: 12px;")
+
+    # ------------------------------------------------------------------
+    # Selection Handling
+    # ------------------------------------------------------------------
+    def on_selection_changed(self):
+        """Enable/disable delete button based on selection."""
+        selected = self.table.selectedItems()
+        self.delete_btn.setEnabled(len(selected) > 0)
+
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
     def open_new_shipment_dialog(self):
-        from ui.pages.import_shipment import ImportShipmentDialog
+        """Open the dialog to create a new shipment."""
         dialog = ImportShipmentDialog(
             parent=self,
             current_user=self.current_user,
             mode="create"
         )
-        dialog.exec()
-
-    def refresh(self):
-        pass
-
-    def delete_shipment(self):
-        pass
-
-    def delete_selected_shipment(self):
-        pass
+        if dialog.exec():
+            self.refresh()
 
     def on_table_double_clicked(self, index):
-        pass
+        """Open the shipment for editing/viewing when double-clicked."""
+        row = index.row()
+        # Make sure the row index is valid and the item exists
+        id_item = self.table.item(row, 0)
+        if not id_item:
+            return
 
-    def on_selection_changed(self):
-        pass
+        shipment_id = id_item.data(Qt.UserRole)
+        if not shipment_id:
+            # Fallback: try to parse the ID from text
+            try:
+                shipment_id = int(id_item.text())
+            except ValueError:
+                return
+
+        # Check status
+        status_item = self.table.item(row, 7)
+        if status_item and "Approved" in status_item.text():
+            mode = "view"
+        else:
+            mode = "edit"
+
+        dialog = ImportShipmentDialog(
+            parent=self,
+            current_user=self.current_user,
+            mode=mode,
+            shipment_id=shipment_id
+        )
+        if dialog.exec():
+            self.refresh()
+
+    def delete_selected_shipment(self):
+        selected = self.table.selectedItems()
+        if not selected:
+            return
+
+        row = selected[0].row()
+        id_item = self.table.item(row, 0)
+        if not id_item:
+            return
+
+        shipment_id = id_item.data(Qt.UserRole)
+        if not shipment_id:
+            try:
+                shipment_id = int(id_item.text())
+            except ValueError:
+                return
+
+        status_item = self.table.item(row, 7)
+        if status_item and "Approved" in status_item.text():
+            QMessageBox.warning(self, "Cannot Delete", "Approved shipments cannot be deleted.")
+            return

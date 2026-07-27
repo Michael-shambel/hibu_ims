@@ -21,6 +21,7 @@ class ShipmentProduct(BaseModel):
     cbm_per_carton = Column(Float, nullable=False)
 
     total_cbm = Column(Float, nullable=False)
+    market_price = Column(Float, nullable=True, default=0.0)
 
     shipment = relationship("ImportShipment", back_populates="products")
     product = relationship("ProfessionalProduct", foreign_keys=[product_id])

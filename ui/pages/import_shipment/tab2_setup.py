@@ -132,25 +132,43 @@ class Tab2SetupMixin:
         return costs
 
     def add_cost_row(self, data):
-        """Add a cost row to the cost table."""
+        """Add a cost row to the cost table. Prevents duplicate cost types."""
+        cost_type_id = data.get("cost_type_id")
+        if not cost_type_id:
+            return False
+            
+        # --- Check for duplicate cost type in the current table ---
+        for row_idx in range(self.cost_table.rowCount()):
+            existing_item = self.cost_table.item(row_idx, 0)
+            if existing_item:
+                existing_id = existing_item.data(Qt.UserRole)
+                if existing_id == cost_type_id:
+                    QMessageBox.warning(
+                        self,
+                        "Duplicate Cost Type",
+                        f"Cost type '{data.get('cost_type_name', 'Unknown')}' is already added to this shipment.\nPlease use a different cost type or edit the existing one."
+                    )
+                    return False
+
+        # --- Proceed with adding the row ---
         row = self.cost_table.rowCount()
         self.cost_table.insertRow(row)
-    
+
         # Cost Type (store the ID for later)
         cost_type_name = data["cost_type_name"]
-        cost_type_id = data["cost_type_id"]
         item = QTableWidgetItem(cost_type_name)
         item.setData(Qt.UserRole, cost_type_id)  # store ID
         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
         self.cost_table.setItem(row, 0, item)
-    
+
         # Amount
         amount_item = QTableWidgetItem(f"{data['amount']:,.2f}")
         amount_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.cost_table.setItem(row, 1, amount_item)
-    
+
         self.update_total_costs()
         self.calculate_landed()
+        return True
 
     def remove_selected_cost(self):
         """Remove the selected cost row."""

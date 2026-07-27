@@ -93,6 +93,8 @@ class UtilsMixin:
             if cartons <= 0 or qty_per <= 0 or unit_price_rmb <= 0:
                 continue  # skip invalid rows
 
+            market_price_item = self.product_table.item(row, 8)
+            market_price = float(market_price_item.text().replace(',', '')) if market_price_item else 0.0
             products.append({
                 "item_number": item_number if item_number else None,
                 "product_name": product_name,
@@ -101,5 +103,6 @@ class UtilsMixin:
                 "qty_per_carton": int(qty_per),
                 "unit_price_rmb": unit_price_rmb,
                 "cbm_per_carton": cbm_per_carton,
+                "market_price": market_price,
             })
         return products

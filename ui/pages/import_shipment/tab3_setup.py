@@ -13,11 +13,10 @@ class Tab3SetupMixin:
         self.tab3 = QWidget()
         layout = QVBoxLayout(self.tab3)
 
-        # --- Basis & Margin Controls ---
+        # --- Basis & Margin Controls (unchanged) ---
         controls_group = QGroupBox("Landed Unit Basis & Pricing")
         controls_layout = QHBoxLayout(controls_group)
 
-        # Basis radio buttons
         basis_widget = QWidget()
         basis_layout = QHBoxLayout(basis_widget)
         self.per_qty_radio = QRadioButton("Per Quantity")
@@ -36,7 +35,6 @@ class Tab3SetupMixin:
 
         controls_layout.addWidget(basis_widget, 2)
 
-        # Target Margin (applies to all products to calculate Selling Price)
         margin_widget = QWidget()
         margin_layout = QHBoxLayout(margin_widget)
         margin_layout.addWidget(QLabel("Target Margin (%):"))
@@ -54,15 +52,15 @@ class Tab3SetupMixin:
 
         layout.addWidget(controls_group)
 
-        # --- Landed Table (with new columns) ---
+        # --- Landed Table (with new Qty/Carton column) ---
         landed_group = QGroupBox("Landed Cost & Margin per Product")
         landed_layout = QVBoxLayout(landed_group)
 
         self.landed_table = QTableWidget()
-        self.landed_table.setColumnCount(10)
+        self.landed_table.setColumnCount(11)  # <-- UPDATED
         self.landed_table.setHorizontalHeaderLabels([
-            "Product", "Cartons", "Qty", "FOB (ETB)",
-            "Allocation (ETB)", "Total Cost (ETB)",
+            "Product", "Cartons", "Qty/Carton", "Total Qty",
+            "FOB (ETB)", "Allocation (ETB)", "Total Cost (ETB)",
             "Landed Unit (ETB)", "Selling Price (ETB)",
             "Market Price (ETB)", "Implied Margin (%)"
         ])
@@ -77,18 +75,17 @@ class Tab3SetupMixin:
 
         landed_layout.addWidget(self.landed_table)
 
-        # --- Grand Total ---
+        # --- Grand Total (unchanged) ---
         self.grand_total_label = QLabel("Grand Total Landed Cost (ETB): 0.00")
         self.grand_total_label.setStyleSheet("font-size: 16pt; font-weight: bold; color: #1a6b3c;")
         landed_layout.addWidget(self.grand_total_label)
 
         layout.addWidget(landed_group)
 
-        # --- Profit Analysis Section ---
+        # --- Profit Analysis (unchanged) ---
         profit_group = QGroupBox("Profit Analysis")
         profit_layout = QVBoxLayout(profit_group)
 
-        # First row: Cost & Selling Price (Target Margin)
         profit_row1 = QHBoxLayout()
         self.profit_total_cost_label = QLabel("Total Landed Cost: ETB 0.00")
         self.profit_total_cost_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
@@ -105,7 +102,6 @@ class Tab3SetupMixin:
         profit_row1.addWidget(self.profit_total_market_label)
         profit_layout.addLayout(profit_row1)
 
-        # Second row: Profit & Margin
         profit_row2 = QHBoxLayout()
         self.profit_target_label = QLabel("Profit (Target Margin): ETB 0.00  (0.00%)")
         self.profit_target_label.setStyleSheet("font-weight: bold; color: #27ae60;")
@@ -117,7 +113,6 @@ class Tab3SetupMixin:
         profit_row2.addWidget(self.profit_market_label)
         profit_row2.addStretch()
 
-        # Difference label (Target vs Market)
         self.profit_diff_label = QLabel("Market vs Target Difference: ETB 0.00")
         self.profit_diff_label.setStyleSheet("font-weight: bold; color: #e74c3c;")
         profit_row2.addWidget(self.profit_diff_label)
@@ -149,11 +144,11 @@ class Tab3SetupMixin:
 
         for i, res in enumerate(self.landed_results):
             landed_unit = res['landed_qty'] if self.current_basis == "qty" else res['landed_carton']
-            self.landed_table.setItem(i, 6, QTableWidgetItem(f"{landed_unit:,.2f}"))
+            self.landed_table.setItem(i, 7, QTableWidgetItem(f"{landed_unit:,.2f}"))  # <-- 6 -> 7
 
         # Update header of landed unit column
         basis_label = "Landed Unit (per Qty)" if self.current_basis == "qty" else "Landed Unit (per Carton)"
-        self.landed_table.setHorizontalHeaderItem(6, QTableWidgetItem(basis_label))
+        self.landed_table.setHorizontalHeaderItem(7, QTableWidgetItem(basis_label))   # <-- 6 -> 7
 
         self.calculate_selling_prices()
         self.calculate_implied_margins()
@@ -169,7 +164,7 @@ class Tab3SetupMixin:
         for i, res in enumerate(self.landed_results):
             landed_unit = res['landed_qty'] if self.current_basis == "qty" else res['landed_carton']
             selling_price = landed_unit * (1 + target_margin)
-            self.landed_table.setItem(i, 7, QTableWidgetItem(f"{selling_price:,.2f}"))
+            self.landed_table.setItem(i, 8, QTableWidgetItem(f"{selling_price:,.2f}"))  # <-- 7 -> 8
 
         self.update_profit_summary()
 
@@ -181,8 +176,8 @@ class Tab3SetupMixin:
         for i, res in enumerate(self.landed_results):
             landed_unit = res['landed_qty'] if self.current_basis == "qty" else res['landed_carton']
 
-            # Get market price from column 8
-            market_item = self.landed_table.item(i, 8)
+            # Get market price from column 9 (was 8)
+            market_item = self.landed_table.item(i, 9)
             try:
                 market_price = float(market_item.text().replace(',', '')) if market_item else 0.0
             except ValueError:
@@ -193,13 +188,13 @@ class Tab3SetupMixin:
             else:
                 margin_pct = ((market_price - landed_unit) / landed_unit) * 100
 
-            self.landed_table.setItem(i, 9, QTableWidgetItem(f"{margin_pct:,.2f} %"))
+            self.landed_table.setItem(i, 10, QTableWidgetItem(f"{margin_pct:,.2f} %"))  # <-- 9 -> 10
 
         self.update_profit_summary()
 
     def on_market_price_changed(self, row, col):
         """When Market Price (col 8) is edited, recalculate Implied Margin (col 9)."""
-        if col == 8:
+        if col == 9:
             self.calculate_implied_margins()
 
     def set_market_price_for_all(self, price):
@@ -208,7 +203,7 @@ class Tab3SetupMixin:
             return
 
         for i in range(len(self.landed_results)):
-            self.landed_table.setItem(i, 8, QTableWidgetItem(f"{price:,.2f}"))
+            self.landed_table.setItem(i, 9, QTableWidgetItem(f"{price:,.2f}"))  # <-- 8 -> 9
         self.calculate_implied_margins()
 
     def update_profit_summary(self):
@@ -229,55 +224,46 @@ class Tab3SetupMixin:
         total_selling = 0.0
         total_market = 0.0
 
-        # Use the unrounded values from self.landed_results
         for i, res in enumerate(self.landed_results):
-            # Use the exact quantity from the product data
             if self.current_basis == "qty":
-                qty = res["total_quantity"]  # Total Qty (column 2)
+                qty = res["total_quantity"]
             else:
-                qty = res["cartons"]         # Cartons (column 1)
+                qty = res["cartons"]
 
-            # Total cost per product (unrounded)
-            cost = res["total_cost"]  # From calculate_landed
+            cost = res["total_cost"]
             total_cost += cost
 
-            # Selling price per product (from table, column 7)
-            sp_item = self.landed_table.item(i, 7)
+            # Selling price – column 8 (was 7)
+            sp_item = self.landed_table.item(i, 8)
             try:
                 sp = float(sp_item.text().replace(',', '')) if sp_item else 0.0
             except ValueError:
                 sp = 0.0
             total_selling += sp * qty
 
-            # Market price per product (from table, column 8)
-            mp_item = self.landed_table.item(i, 8)
+            # Market price – column 9 (was 8)
+            mp_item = self.landed_table.item(i, 9)
             try:
                 mp = float(mp_item.text().replace(',', '')) if mp_item else 0.0
             except ValueError:
                 mp = 0.0
             total_market += mp * qty
 
-        # Update labels
         self.profit_total_cost_label.setText(f"Total Landed Cost: ETB {total_cost:,.2f}")
-
         self.profit_total_selling_label.setText(f"Total Selling (Target Margin): ETB {total_selling:,.2f}")
-
         self.profit_total_market_label.setText(f"Total Market Value: ETB {total_market:,.2f}")
 
-        # Profit & margin for target margin
         profit_target = total_selling - total_cost
         margin_target = (profit_target / total_cost * 100) if total_cost > 0 else 0.0
         self.profit_target_label.setText(
             f"Profit (Target Margin): ETB {profit_target:,.2f}  ({margin_target:,.2f}%)"
         )
 
-        # Profit & margin for market price
         profit_market = total_market - total_cost
         margin_market = (profit_market / total_cost * 100) if total_cost > 0 else 0.0
         self.profit_market_label.setText(
             f"Profit (Market Price): ETB {profit_market:,.2f}  ({margin_market:,.2f}%)"
         )
 
-        # Difference
         diff = profit_market - profit_target
         self.profit_diff_label.setText(f"Market vs Target Difference: ETB {diff:,.2f}")
