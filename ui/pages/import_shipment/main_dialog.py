@@ -430,7 +430,11 @@ class ImportShipmentDialog(
         self.save_btn.setVisible(not enabled)
 
     def load_shipment(self, shipment_id):
-        """Load an existing shipment into the UI."""
+        """Load an existing shipment into the UI for editing or viewing."""
+        from PySide6.QtCore import QDate
+        from PySide6.QtWidgets import QTableWidgetItem
+        from services.import_shipment_service import ImportShipmentService
+
         service = ImportShipmentService()
         shipment = service.get_by_id_with_relations(shipment_id)
         if not shipment:
@@ -438,18 +442,33 @@ class ImportShipmentDialog(
             self.reject()
             return
 
-        # Set basic info
-        self.supplier_combo.setCurrentIndex(self.supplier_combo.findData(shipment.supplier_id))
-        self.bank_combo.setCurrentIndex(self.bank_combo.findData(shipment.bank_account_id))
-        # Convert Python date to QDate
-        from PySide6.QtCore import QDate
-        self.date_edit.setDate(QDate(shipment.proforma_date.year, shipment.proforma_date.month, shipment.proforma_date.day))
+        # --- Set window title and save button text based on mode ---
+        if self.mode == "view":
+            self.setWindowTitle(f"View Shipment #{shipment_id}")
+            # Save button will be hidden by set_read_only(True)
+        else:
+            self.setWindowTitle(f"Edit Shipment #{shipment_id}")
+            self.save_btn.setText("💾 Update Draft")   # change button text
+
+        # --- Populate basic info ---
+        self.supplier_combo.setCurrentIndex(
+            self.supplier_combo.findData(shipment.supplier_id)
+        )
+        self.bank_combo.setCurrentIndex(
+            self.bank_combo.findData(shipment.bank_account_id)
+        )
+        self.date_edit.setDate(
+            QDate(
+                shipment.proforma_date.year,
+                shipment.proforma_date.month,
+                shipment.proforma_date.day
+            )
+        )
         self.rate_spin.spin_box.setValue(shipment.exchange_rate)
         self.target_margin_spin.setValue(shipment.target_margin or 20.0)
 
-        # Clear any existing rows (should be empty for new, but safe)
+        # --- Load products ---
         self.product_table.setRowCount(0)
-        # Add products
         for product in shipment.products:
             if not product.is_deleted:
                 data = {
@@ -463,7 +482,7 @@ class ImportShipmentDialog(
                 }
                 self.add_product_row_to_table(data)
 
-        # Clear costs and add
+        # --- Load costs ---
         self.cost_table.setRowCount(0)
         for cost in shipment.costs:
             if not cost.is_deleted:
@@ -474,7 +493,31 @@ class ImportShipmentDialog(
                 }
                 self.add_cost_row(data)
 
-        # Determine mode based on status
+        # --- Recalculate landed costs (this will fill the landed table with default 0.00 market prices) ---
+        self.calculate_landed()
+
+        # --- Restore market prices from the shipment products ---
+        if shipment.products:
+            # Build a map of product_name -> market_price from the shipment
+            market_price_map = {
+                p.product_name: p.market_price for p in shipment.products if p.product_name
+            }
+
+            # Iterate over the landed table rows and set market price if we have a match
+            for row in range(self.landed_table.rowCount()):
+                name_item = self.landed_table.item(row, 0)
+                if name_item:
+                    product_name = name_item.text().strip()
+                    if product_name in market_price_map:
+                        price = market_price_map[product_name] or 0.0
+                        self.landed_table.setItem(row, 9, QTableWidgetItem(f"{price:,.2f}"))
+
+            # Recalculate implied margins and profit summary (since market prices changed)
+            self.calculate_implied_margins()
+            self.update_profit_summary()
+            self.apply_landed_table_styling()
+
+        # --- Determine mode based on status ---
         if shipment.status.value == "approved":
             self.mode = "view"
             self.set_read_only(True)
@@ -482,6 +525,3 @@ class ImportShipmentDialog(
             self.set_read_only(True)
         else:
             self.set_read_only(False)
-
-        # Recalculate all tabs
-        self.calculate_landed()

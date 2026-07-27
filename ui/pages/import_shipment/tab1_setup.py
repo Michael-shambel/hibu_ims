@@ -325,12 +325,6 @@ class Tab1SetupMixin:
         self.update_table_summary()
         self.update_total_display()
         self.calculate_landed()
-    
-        # If no rows left, add an empty row so the user can add more
-        if self.product_table.rowCount() == 0:
-            self.product_table.setRowCount(1)
-            for col in range(self.product_table.columnCount()):
-                self.product_table.setItem(0, col, QTableWidgetItem(""))
 
     def on_table_item_changed(self, item):
         """
@@ -452,7 +446,7 @@ class Tab1SetupMixin:
             
         # Remove all rows (keep one empty row for adding new products)
         self.product_table.setRowCount(0)
-        self.product_table.setRowCount(1)
+        # self.product_table.setRowCount(1)
             
         # Clear all cells in the empty row
         for col in range(self.product_table.columnCount()):

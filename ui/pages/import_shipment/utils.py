@@ -48,8 +48,24 @@ class UtilsMixin:
         return None
 
     def get_products_from_table(self):
-        """Extract product data from the table, skipping empty rows."""
+        """Extract product data from the product table, including market prices from the landed table."""
         products = []
+
+        # --- Build a map of product name -> market price from the landed table ---
+        market_price_map = {}
+        for row in range(self.landed_table.rowCount()):
+            name_item = self.landed_table.item(row, 0)
+            if name_item:
+                product_name = name_item.text().strip()
+                market_item = self.landed_table.item(row, 9)  # column 9 = Market Price
+                if market_item:
+                    try:
+                        price = float(market_item.text().replace(',', ''))
+                        market_price_map[product_name] = price
+                    except ValueError:
+                        pass
+
+        # --- Iterate over product table rows ---
         for row in range(self.product_table.rowCount()):
             # Skip the summary row (if it exists)
             if self.product_table.item(row, 0) and self.product_table.item(row, 0).text() == "TOTAL":
@@ -70,7 +86,7 @@ class UtilsMixin:
             if not product_name:
                 product_name = item_number
 
-            # Skip if still empty (shouldn't happen now)
+            # Skip if still empty
             if not product_name:
                 continue
 
@@ -91,10 +107,11 @@ class UtilsMixin:
                 continue  # skip rows with invalid numbers
 
             if cartons <= 0 or qty_per <= 0 or unit_price_rmb <= 0:
-                continue  # skip invalid rows
+                continue
 
-            market_price_item = self.product_table.item(row, 8)
-            market_price = float(market_price_item.text().replace(',', '')) if market_price_item else 0.0
+            # Look up market price from the landed table
+            market_price = market_price_map.get(product_name, 0.0)
+
             products.append({
                 "item_number": item_number if item_number else None,
                 "product_name": product_name,
@@ -103,6 +120,6 @@ class UtilsMixin:
                 "qty_per_carton": int(qty_per),
                 "unit_price_rmb": unit_price_rmb,
                 "cbm_per_carton": cbm_per_carton,
-                "market_price": market_price,
+                "market_price": market_price,   # <-- now saved from landed table
             })
         return products
