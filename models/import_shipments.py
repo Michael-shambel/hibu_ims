@@ -1,6 +1,6 @@
 
 from enum import Enum
-from sqlalchemy import Column, Integer, Float, ForeignKey, Date, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, Date, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 from models.engine.database import BaseModel
 
@@ -20,6 +20,7 @@ class ImportShipment(BaseModel):
     status = Column(SQLEnum(ShipmentStatusEnum), nullable=False, default=ShipmentStatusEnum.DRAFT)
     created_by_user_id = Column(Integer, ForeignKey("auth_users.id"), nullable=False)
     target_margin = Column(Float, nullable=True, default=20.0)
+    allocation_mode = Column(String(20), nullable=True, default="used_cbm")
 
 
     supplier = relationship("Supplier", foreign_keys=[supplier_id])

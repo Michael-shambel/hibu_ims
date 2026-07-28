@@ -27,6 +27,7 @@ class ImportShipmentService(BaseService):
                 proforma_date=data['proforma_date'],
                 exchange_rate=float(data['exchange_rate']),
                 target_margin=data.get('target_margin', 20.0),
+                allocation_mode=data.get('allocation_mode', 'used_cbm'),
                 status=ShipmentStatusEnum.DRAFT,
                 created_by_user_id=data['created_by_user_id']
             )
@@ -130,6 +131,7 @@ class ImportShipmentService(BaseService):
             shipment.proforma_date = data['proforma_date']
             shipment.exchange_rate = float(data['exchange_rate'])
             shipment.target_margin = data.get('target_margin', 20.0)
+            shipment.allocation_mode = data.get('allocation_mode', 'used_cbm')
 
             for prod in shipment.products:
                 session.delete(prod)

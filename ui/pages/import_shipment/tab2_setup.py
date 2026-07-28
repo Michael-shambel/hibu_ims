@@ -15,6 +15,73 @@ class Tab2SetupMixin:
         """Build Tab 2: Costs & Allocation."""
         self.tab2 = QWidget()
         layout = QVBoxLayout(self.tab2)
+
+        # ===== NEW: Allocation Mode Selection =====
+        mode_group = QGroupBox("Container Allocation Basis")
+        mode_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 15px;
+                padding: 0 8px 0 8px;
+            }
+        """)
+        mode_layout = QVBoxLayout(mode_group)
+
+        # mode_info_label = QLabel(
+        #     "Choose how container-related costs (Freight, LC Permit, etc.) should be allocated:\n"
+        #     "• Fixed Container Capacity – use full container CBM (e.g., 68 CBM)\n"
+        #     "• Total Used CBM – use only the CBM of products in this shipment"
+        # )
+        # mode_info_label.setStyleSheet("color: #7f8c8d; font-size: 11px; padding: 5px;")
+        # mode_info_label.setWordWrap(True)
+        # mode_layout.addWidget(mode_info_label)
+
+        mode_radio_layout = QHBoxLayout()
+        self.fixed_cbm_radio = QRadioButton("Fixed Container Capacity (68 CBM)")
+        self.used_cbm_radio = QRadioButton("Total Used CBM")
+        self.used_cbm_radio.setChecked(True)  # default
+
+        self.fixed_cbm_radio.toggled.connect(self.on_allocation_mode_changed)
+        self.used_cbm_radio.toggled.connect(self.on_allocation_mode_changed)
+
+        # Add a spinbox for custom fixed CBM (optional, but useful)
+        self.fixed_cbm_spin = QDoubleSpinBox()
+        self.fixed_cbm_spin.setRange(1.0, 1000.0)
+        self.fixed_cbm_spin.setDecimals(1)
+        self.fixed_cbm_spin.setValue(68.0)
+        self.fixed_cbm_spin.setSuffix(" CBM")
+        self.fixed_cbm_spin.setEnabled(False)
+        self.fixed_cbm_spin.valueChanged.connect(self.on_allocation_mode_changed)
+
+        # Connect radio to enable/disable the spinbox
+        self.fixed_cbm_radio.toggled.connect(
+            lambda checked: self.fixed_cbm_spin.setEnabled(checked)
+        )
+
+        mode_radio_layout.addWidget(self.fixed_cbm_radio)
+        mode_radio_layout.addWidget(self.fixed_cbm_spin)
+        mode_radio_layout.addSpacing(20)
+        mode_radio_layout.addWidget(self.used_cbm_radio)
+        mode_radio_layout.addStretch()
+
+        mode_layout.addLayout(mode_radio_layout)
+
+        self.dead_freight_label = QLabel("⚠️ Dead Freight (unallocated cost): ETB 0.00")
+        self.dead_freight_label.setStyleSheet("color: #e74c3c; font-weight: bold; padding: 5px;")
+        self.dead_freight_label.setVisible(False)   # hidden by default
+        mode_layout.addWidget(self.dead_freight_label)
+
+
+        # Store the fixed CBM value for later use
+        self.container_capacity = 68.0
+        layout.addWidget(mode_group)
     
         # --- Cost Table ---
         cost_group = QGroupBox("Additional Costs (Allocated By CBM)")
@@ -229,3 +296,15 @@ class Tab2SetupMixin:
                 except ValueError:
                     pass
         self.total_costs_label.setText(f"Total Additional Costs: ETB {total:,.2f}")
+
+    def on_allocation_mode_changed(self):
+        """Handle changes to the allocation mode radio buttons."""
+        # Update the allocation mode
+        if self.fixed_cbm_radio.isChecked():
+            self.allocation_mode = "fixed"
+            self.container_capacity = self.fixed_cbm_spin.value()
+        else:
+            self.allocation_mode = "used_cbm"
+
+        # Recalculate landed costs with the new mode
+        self.calculate_landed()

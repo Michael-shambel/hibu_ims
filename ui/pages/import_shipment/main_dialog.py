@@ -49,6 +49,9 @@ class ImportShipmentDialog(
         self.cost_type_service = CostTypeService()
         self._updating = False
         self.current_basis = "qty"
+        self.allocation_mode = "used_cbm"  # <-- NEW
+        self.container_capacity = 68.0      # <-- NEW
+        self.dead_freight = 0.0
         self.products_data = []
         self.landed_results = []
 
@@ -366,7 +369,8 @@ class ImportShipmentDialog(
             "created_by_user_id": user_id,
             "products": products,
             "costs": costs,
-            "target_margin": target_margin
+            "target_margin": target_margin,
+            "allocation_mode": self.allocation_mode,
         }
 
         try:
@@ -466,6 +470,13 @@ class ImportShipmentDialog(
         )
         self.rate_spin.spin_box.setValue(shipment.exchange_rate)
         self.target_margin_spin.setValue(shipment.target_margin or 20.0)
+
+        self.allocation_mode = shipment.allocation_mode or "used_cbm"
+        if self.allocation_mode == "fixed":
+            self.fixed_cbm_radio.setChecked(True)
+            self.fixed_cbm_spin.setValue(self.container_capacity)
+        else:
+            self.used_cbm_radio.setChecked(True)
 
         # --- Load products ---
         self.product_table.setRowCount(0)

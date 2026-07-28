@@ -10,9 +10,14 @@ from PySide6.QtGui import QColor, QFont
 from ui.pages.product_dialog import ModernLineEdit
 
 class CalculationsMixin:
-    """Contains calculate_landed and related helpers."""
+    """Contains calculate_landed and related helpers. grand_total_etb"""
 
     def calculate_landed(self):
+        """
+        Recalculate landed cost allocation and update:
+        - Tab 2: allocation matrix
+        - Tab 3: landed table, grand total, and pricing columns
+        """
         # --- Step 1: Extract product data from the main table ---
         products = []
         total_cbm_sum = 0.0
@@ -62,7 +67,7 @@ class CalculationsMixin:
             products.append({
                 "name": product_name,
                 "cartons": cartons,
-                "qty_per": qty_per,                     # <-- keep this
+                "qty_per": qty_per,
                 "total_quantity": total_quantity,
                 "unit_price_rmb": unit_price_rmb,
                 "cbm_per": cbm_per,
@@ -86,14 +91,30 @@ class CalculationsMixin:
         self.products_data = products
 
         # --- Step 3: If no products or no costs, clear tables ---
-        if not products or not costs or total_cbm_sum == 0:
+        if not products or not costs or total_cbm_sum <= 0:
             self.alloc_table.setRowCount(0)
             self.alloc_table.setColumnCount(0)
             self.landed_table.setRowCount(0)
             self.grand_total_label.setText("Grand Total Landed Cost (ETB): 0.00")
+            self.landed_results = []
             return
 
-        # --- Step 4: Allocate each cost across products ---
+        # --- Step 4: Determine allocation denominator once ---
+        if self.allocation_mode == "fixed":
+            allocation_denominator = self.container_capacity
+        else:
+            allocation_denominator = total_cbm_sum
+
+        # If denominator is zero, we can't allocate
+        if allocation_denominator <= 0:
+            self.alloc_table.setRowCount(0)
+            self.alloc_table.setColumnCount(0)
+            self.landed_table.setRowCount(0)
+            self.grand_total_label.setText("Grand Total Landed Cost (ETB): 0.00")
+            self.landed_results = []
+            return
+
+        # --- Step 5: Allocate each cost across products ---
         product_allocations = []
         landed_results = []
         grand_total_etb = 0.0
@@ -101,8 +122,10 @@ class CalculationsMixin:
         for prod in products:
             allocs = []
             for cost in costs:
-                allocated = (cost["amount"] / total_cbm_sum) * prod["total_cbm"]
+                # Allocate cost proportionally by product CBM
+                allocated = (cost["amount"] / allocation_denominator) * prod["total_cbm"]
                 allocs.append(allocated)
+
             total_alloc = sum(allocs)
             total_cost = (prod["total_quantity"] * prod["unit_price_rmb"] * self.rate_spin.spin_box.value()) + total_alloc
             landed_qty = total_cost / prod["total_quantity"] if prod["total_quantity"] > 0 else 0
@@ -116,7 +139,7 @@ class CalculationsMixin:
             landed_results.append({
                 "name": prod["name"],
                 "cartons": prod["cartons"],
-                "qty_per_carton": prod["qty_per"],               # <-- NEW FIELD
+                "qty_per_carton": prod["qty_per"],
                 "total_quantity": prod["total_quantity"],
                 "fob_etb": prod["total_quantity"] * prod["unit_price_rmb"] * self.rate_spin.spin_box.value(),
                 "allocated": total_alloc,
@@ -125,11 +148,28 @@ class CalculationsMixin:
                 "landed_carton": landed_carton,
             })
             grand_total_etb += total_cost
+            
+        # --- Compute dead freight (must be done after product loop) ---
+        total_cost_sum = sum(c["amount"] for c in costs)
+        total_allocated_sum = sum(pa["total_alloc"] for pa in product_allocations)
+        if self.allocation_mode == "fixed" and allocation_denominator > total_cbm_sum:
+            self.dead_freight = total_cost_sum - total_allocated_sum
+        else:
+            self.dead_freight = 0.0
+
+        # Update dead freight label
+        if hasattr(self, 'dead_freight_label'):
+            if self.dead_freight > 0:
+                self.dead_freight_label.setText(
+                    f"⚠️ Dead Freight (unallocated cost): ETB {self.dead_freight:,.2f}"
+                )
+                self.dead_freight_label.setVisible(True)
+            else:
+                self.dead_freight_label.setVisible(False)
 
         self.landed_results = landed_results
 
-        # --- Step 5: Update allocation matrix (Tab 2) ---
-        # (unchanged, omitted for brevity – keep your existing code here)
+        # --- Step 6: Update allocation matrix (Tab 2) ---
         n_products = len(products)
         n_costs = len(costs)
         self.alloc_table.setRowCount(n_products + 1)
@@ -185,28 +225,20 @@ class CalculationsMixin:
         self.alloc_table.verticalHeader().setDefaultSectionSize(40)
         self.alloc_table.setAlternatingRowColors(True)
 
-        # --- Step 6: Update landed table (Tab 3) with new Qty/Carton column ---
+        # --- Step 7: Update landed table (Tab 3) with new Qty/Carton column ---
         self.landed_table.setRowCount(len(landed_results))
         for i, res in enumerate(landed_results):
-            # Col 0: Product
             self.landed_table.setItem(i, 0, QTableWidgetItem(res["name"]))
-            # Col 1: Cartons
             self.landed_table.setItem(i, 1, QTableWidgetItem(str(res["cartons"])))
-            # Col 2: Qty/Carton (NEW)
             self.landed_table.setItem(i, 2, QTableWidgetItem(str(res["qty_per_carton"])))
-            # Col 3: Total Qty
             self.landed_table.setItem(i, 3, QTableWidgetItem(str(res["total_quantity"])))
-            # Col 4: FOB (ETB)
             self.landed_table.setItem(i, 4, QTableWidgetItem(f"{res['fob_etb']:,.2f}"))
-            # Col 5: Allocation (ETB)
             self.landed_table.setItem(i, 5, QTableWidgetItem(f"{res['allocated']:,.2f}"))
-            # Col 6: Total Cost (ETB)
             self.landed_table.setItem(i, 6, QTableWidgetItem(f"{res['total_cost']:,.2f}"))
-            # Col 7: Landed Unit (handled by update_landed_table)
-            # Col 8: Selling Price (handled by calculate_selling_prices)
-            # Col 9: Market Price – default 0.00
-            self.landed_table.setItem(i, 9, QTableWidgetItem("0.00"))
-            # Col 10: Implied Margin (handled by calculate_implied_margins)
+            # Col 7: Landed Unit (set by update_landed_table)
+            # Col 8: Selling Price (set by calculate_selling_prices)
+            self.landed_table.setItem(i, 9, QTableWidgetItem("0.00"))  # Market Price default
+            # Col 10: Implied Margin (set by calculate_implied_margins)
 
         # Update header of landed unit column (col 7)
         basis_label = "Landed Unit (per Qty)" if self.current_basis == "qty" else "Landed Unit (per Carton)"
@@ -215,14 +247,15 @@ class CalculationsMixin:
         # Grand total
         self.grand_total_label.setText(f"Grand Total Landed Cost (ETB): {grand_total_etb:,.2f}")
 
+        # Populate the landed unit column
         self.update_landed_table()
 
-        # --- Step 7: Calculate pricing columns (selling price & implied margin) ---
+        # --- Step 8: Calculate pricing columns ---
         self.calculate_selling_prices()
         self.calculate_implied_margins()
 
         self.update_profit_summary()
-        self.apply_landed_table_styling() 
+        self.apply_landed_table_styling()
 
     def apply_landed_table_styling(self):
         """Apply visual styling to important columns in the landed table."""
