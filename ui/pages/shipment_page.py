@@ -96,7 +96,7 @@ class ImportShipmentPage(QWidget):
     # UI construction
     # ------------------------------------------------------------------
     def init_ui(self):
-        """Initialize the modern UI."""
+        """Initialize the modern UI. status_value"""
         self.setStyleSheet("background-color: #f4f6f9;")
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -281,7 +281,7 @@ class ImportShipmentPage(QWidget):
         table.setColumnWidth(5, 150)
         table.setColumnWidth(6, 160)
         table.setColumnWidth(7, 110)
-        table.setColumnWidth(8, 90)
+        table.setColumnWidth(8, 160)
 
         table.setStyleSheet("""
             QTableWidget {
@@ -492,35 +492,50 @@ class ImportShipmentPage(QWidget):
             status_item.setFont(QFont("Segoe UI", 10, QFont.Bold))
             self.table.setItem(row, 7, status_item)
 
-            # Actions (view/edit + delete buttons)
-            self.table.setCellWidget(row, 8, self.build_action_widget(shipment.id, is_approved))
+            status_value = shipment.status.value if shipment.status else "draft"
+            self.table.setCellWidget(row, 8, self.build_action_widget(shipment.id, status_value))
 
         self.table.setSortingEnabled(True)
 
-    def build_action_widget(self, shipment_id, is_approved):
-        """Small inline action buttons for a table row."""
+    def build_action_widget(self, shipment_id, status):
+        """
+        Return a widget with action buttons.
+        status: "draft", "approved", or "cancelled"
+        """
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(6)
+        layout.setSpacing(4)
 
-        view_btn = make_row_action_button(
-            "👁" if is_approved else "✏️",
-            "View shipment" if is_approved else "Edit shipment",
-            "#3498db", "#2980b9"
-        )
-        view_btn.clicked.connect(lambda: self.open_shipment_dialog(shipment_id, is_approved))
-        layout.addWidget(view_btn)
+        # ---- Common View/Edit button ----
+        if status == "draft":
+            # Draft -> Edit (pencil)
+            edit_btn = make_row_action_button("✏️", "Edit shipment", "#3498db", "#2980b9")
+            edit_btn.clicked.connect(lambda: self.open_shipment_dialog(shipment_id, False))
+            layout.addWidget(edit_btn)
+        else:
+            # Approved or Cancelled -> View (eye)
+            view_btn = make_row_action_button("👁", "View shipment", "#3498db", "#2980b9")
+            view_btn.clicked.connect(lambda: self.open_shipment_dialog(shipment_id, True))
+            layout.addWidget(view_btn)
 
-        delete_btn = make_row_action_button("🗑️", "Delete shipment", "#e74c3c", "#c0392b")
-        delete_btn.setEnabled(not is_approved)
-        if is_approved:
-            delete_btn.setToolTip("Approved shipments cannot be deleted")
-            delete_btn.setStyleSheet(delete_btn.styleSheet() + """
-                QPushButton:disabled { background-color: #f0c9c5; }
-            """)
-        delete_btn.clicked.connect(lambda: self.delete_shipment(shipment_id))
-        layout.addWidget(delete_btn)
+        # ---- Approve button (only for draft) ----
+        if status == "draft":
+            approve_btn = make_row_action_button("✅", "Approve shipment", "#27ae60", "#219a52")
+            approve_btn.clicked.connect(lambda: self.approve_shipment(shipment_id))
+            layout.addWidget(approve_btn)
+
+        # ---- Cancel button (only for draft) ----
+        if status == "draft":
+            cancel_btn = make_row_action_button("❌", "Cancel shipment", "#e67e22", "#d35400")
+            cancel_btn.clicked.connect(lambda: self.cancel_shipment(shipment_id))
+            layout.addWidget(cancel_btn)
+
+        # ---- Delete button (only for draft) ----
+        if status == "draft":
+            delete_btn = make_row_action_button("🗑️", "Delete shipment", "#e74c3c", "#c0392b")
+            delete_btn.clicked.connect(lambda: self.delete_shipment(shipment_id))
+            layout.addWidget(delete_btn)
 
         layout.addStretch()
         return container
@@ -643,3 +658,43 @@ class ImportShipmentPage(QWidget):
         self.status_label.setText(f"✅ Shipment #{shipment_id} deleted.")
         self.status_label.setStyleSheet("color: #2ecc71; font-size: 12px;")
         self.refresh()
+
+    def approve_shipment(self, shipment_id):
+        """Approve a draft shipment after confirmation."""
+        reply = QMessageBox.question(
+            self,
+            "Approve Shipment",
+            f"Are you sure you want to approve shipment #{shipment_id}?\n\nThis action cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            self.service.approve_shipment(shipment_id)
+            self.status_label.setText(f"✅ Shipment #{shipment_id} approved.")
+            self.status_label.setStyleSheet("color: #2ecc71; font-size: 12px;")
+            self.refresh()
+        except Exception as e:
+            QMessageBox.critical(self, "Approve Failed", str(e))
+
+    def cancel_shipment(self, shipment_id):
+        """Cancel a draft shipment after confirmation."""
+        reply = QMessageBox.question(
+            self,
+            "Cancel Shipment",
+            f"Are you sure you want to cancel shipment #{shipment_id}?\n\nThis action cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            self.service.cancel_shipment(shipment_id)
+            self.status_label.setText(f"❌ Shipment #{shipment_id} cancelled.")
+            self.status_label.setStyleSheet("color: #e67e22; font-size: 12px;")
+            self.refresh()
+        except Exception as e:
+            QMessageBox.critical(self, "Cancel Failed", str(e))

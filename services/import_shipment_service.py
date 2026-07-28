@@ -174,3 +174,33 @@ class ImportShipmentService(BaseService):
             session.commit()
             logger.info(f"Updated shipment #{shipment.id}")
             return shipment
+
+    def approve_shipment(self, shipment_id: int) -> bool:
+        """Change a DRAFT shipment to APPROVED."""
+        with get_session() as session:
+            shipment = session.query(self.model).filter(
+                self.model.id == shipment_id,
+                self.model.is_deleted == False
+            ).first()
+            if not shipment:
+                return False
+            if shipment.status != ShipmentStatusEnum.DRAFT:
+                raise ValueError("Only DRAFT shipments can be approved")
+            shipment.status = ShipmentStatusEnum.APPROVED
+            session.commit()
+            return True
+
+    def cancel_shipment(self, shipment_id: int) -> bool:
+        """Change a DRAFT shipment to CANCELLED."""
+        with get_session() as session:
+            shipment = session.query(self.model).filter(
+                self.model.id == shipment_id,
+                self.model.is_deleted == False
+            ).first()
+            if not shipment:
+                return False
+            if shipment.status != ShipmentStatusEnum.DRAFT:
+                raise ValueError("Only DRAFT shipments can be cancelled")
+            shipment.status = ShipmentStatusEnum.CANCELLED
+            session.commit()
+            return True

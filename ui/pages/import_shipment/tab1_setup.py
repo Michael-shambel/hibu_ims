@@ -245,7 +245,7 @@ class Tab1SetupMixin:
         self.tabs.addTab(tab1, "📄 Shipment Details")
 
 
-    def add_product_row_to_table(self, data):
+    def add_product_row_to_table(self, data, trigger_calculation=True):
         """Add a product row to the table using the provided data."""
         self.product_table.blockSignals(True)
             
@@ -311,7 +311,8 @@ class Tab1SetupMixin:
         self.product_table.blockSignals(False)
         self.update_table_summary()
         self.update_total_display()
-        self.calculate_landed()
+        if trigger_calculation:
+            self.calculate_landed()
 
     def remove_selected_product(self):
         """Remove the currently selected product row from the table."""

@@ -185,12 +185,12 @@ class ImportShipmentDialog(
         if self.mode == "view":
             self.set_read_only(True)
 
-        # Populate combos with real data from database
-        self.populate_suppliers()
-        self.populate_banks()
+        # # Populate combos with real data from database
+        # self.populate_suppliers()
+        # self.populate_banks()
 
-        # Initial calculation
-        self.calculate_landed()
+        # # Initial calculation
+        # self.calculate_landed()
 
     def parse_excel_file(self, file_path):
         """Parse the Excel file and return a list of product dicts."""
@@ -478,7 +478,7 @@ class ImportShipmentDialog(
         else:
             self.used_cbm_radio.setChecked(True)
 
-        # --- Load products ---
+        # --- Load products (batch mode) ---
         self.product_table.setRowCount(0)
         for product in shipment.products:
             if not product.is_deleted:
@@ -491,9 +491,10 @@ class ImportShipmentDialog(
                     "unit_price_rmb": product.unit_price_rmb,
                     "cbm_per_carton": product.cbm_per_carton,
                 }
-                self.add_product_row_to_table(data)
+                # ✅ Pass False to skip recalculating after each row
+                self.add_product_row_to_table(data, trigger_calculation=False)
 
-        # --- Load costs ---
+        # --- Load costs (no change needed, they don't trigger heavy calc) ---
         self.cost_table.setRowCount(0)
         for cost in shipment.costs:
             if not cost.is_deleted:
@@ -504,7 +505,7 @@ class ImportShipmentDialog(
                 }
                 self.add_cost_row(data)
 
-        # --- Recalculate landed costs (this will fill the landed table with default 0.00 market prices) ---
+        # ✅ Run the calculation ONCE after all products are loaded
         self.calculate_landed()
 
         # --- Restore market prices from the shipment products ---
@@ -529,7 +530,7 @@ class ImportShipmentDialog(
             self.apply_landed_table_styling()
 
         # --- Determine mode based on status ---
-        if shipment.status.value == "approved":
+        if shipment.status.value in ("approved", "cancelled"):
             self.mode = "view"
             self.set_read_only(True)
         elif self.mode == "view":
