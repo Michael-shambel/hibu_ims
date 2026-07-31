@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QDoubleSpinBox, QFormLayout, QWidget, QMessageBox
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QGroupBox,
+    QComboBox, QDoubleSpinBox, QFormLayout, QWidget, QMessageBox, QSizePolicy
 )
-from PySide6.QtCore import Qt
+from ui.components.ethiopian_date import EthiopianDateEdit
+from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QFont
 
 
 class AddCostItemDialog(QDialog):
     """Dialog for adding a new cost item (using CostType from DB)."""
-    
+
     def __init__(self, cost_type_service, parent=None):
         super().__init__(parent)
         self.cost_type_service = cost_type_service
         self.setWindowTitle("Add Cost Item")
         self.setModal(True)
         self.setMinimumWidth(450)
-        self.setMaximumHeight(350)
-        
+        # Remove maximum height constraint to avoid overlap
+        # self.setMaximumHeight(350)
+
         self.setWindowFlags(
             Qt.Window |
             Qt.WindowCloseButtonHint |
@@ -25,20 +27,20 @@ class AddCostItemDialog(QDialog):
             Qt.WindowMaximizeButtonHint
         )
         self.setWindowModality(Qt.WindowModal)
-        
+
         self.init_ui()
-        
+
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
-        
+
         # Title
         title = QLabel("➕ Add Cost Item")
         title.setFont(QFont("Segoe UI", 14, QFont.Bold))
         title.setStyleSheet("color: #2c3e50;")
         layout.addWidget(title)
-        
+
         # Form
         form_widget = QWidget()
         form_widget.setStyleSheet("""
@@ -50,7 +52,7 @@ class AddCostItemDialog(QDialog):
         form_layout = QFormLayout(form_widget)
         form_layout.setContentsMargins(20, 20, 20, 20)
         form_layout.setSpacing(15)
-        
+
         # Cost Type (ComboBox loaded from DB) + Manage button
         type_container = QWidget()
         type_layout = QHBoxLayout(type_container)
@@ -93,7 +95,7 @@ class AddCostItemDialog(QDialog):
         type_layout.addWidget(self.manage_types_btn)
 
         form_layout.addRow("Cost Type:", type_container)
-        
+
         # Amount
         self.amount_spin = QDoubleSpinBox()
         self.amount_spin.setRange(0.01, 1000000000.0)
@@ -112,13 +114,36 @@ class AddCostItemDialog(QDialog):
             }
         """)
         form_layout.addRow("Amount:", self.amount_spin)
-        
+
+        # Paid checkbox
+        self.paid_checkbox = QCheckBox("Paid from Bank Account")
+        self.paid_checkbox.toggled.connect(self.on_paid_toggled)
+
+        # Paid details group (initially hidden)
+        self.paid_group = QGroupBox()
+        paid_group_layout = QFormLayout(self.paid_group)
+
+        self.bank_combo = QComboBox()
+        self.bank_combo.setEditable(True)
+        self.bank_combo.lineEdit().setPlaceholderText("Select bank account...")
+        paid_group_layout.addRow("Bank Account:", self.bank_combo)
+
+        self.payment_date_edit = EthiopianDateEdit()
+        self.payment_date_edit.setDate(QDate.currentDate())
+        paid_group_layout.addRow("Payment Date:", self.payment_date_edit)
+
+        self.paid_group.setVisible(False)
+
+        # Add to main layout after the amount row
+        form_layout.addRow(self.paid_checkbox)
+        form_layout.addRow(self.paid_group)
+
         layout.addWidget(form_widget)
-        
+
         # Buttons
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
-        
+
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setFixedSize(100, 36)
         self.cancel_btn.setCursor(Qt.PointingHandCursor)
@@ -136,7 +161,7 @@ class AddCostItemDialog(QDialog):
             }
         """)
         self.cancel_btn.clicked.connect(self.reject)
-        
+
         self.add_btn = QPushButton("Add Cost")
         self.add_btn.setFixedSize(120, 36)
         self.add_btn.setCursor(Qt.PointingHandCursor)
@@ -154,56 +179,74 @@ class AddCostItemDialog(QDialog):
             }
         """)
         self.add_btn.clicked.connect(self.accept)
-        
+
         btn_layout.addStretch()
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addWidget(self.add_btn)
-        
+
         layout.addLayout(btn_layout)
-        
-        # Load initial data
+
+        # Load data
         self.load_cost_types()
+        self.load_banks()
         self.amount_spin.setFocus()
-    
+
     def load_cost_types(self):
-        """Load cost types from the database."""
         self.type_combo.clear()
         cost_types = self.cost_type_service.get_active()
         for ct in cost_types:
             self.type_combo.addItem(ct.name, ct.id)
-        # If no types, allow typing
         self.type_combo.setEditable(True)
         if self.type_combo.count() > 0:
             self.type_combo.setCurrentIndex(0)
-    
+
+    def load_banks(self):
+        from services.bank_account_service import BankAccountService
+        service = BankAccountService()
+        accounts = service.get_all()
+        self.bank_combo.clear()
+        for acc in accounts:
+            if acc.is_active:
+                display = f"{acc.bank_name} - {acc.account_name}"
+                self.bank_combo.addItem(display, acc.id)
+        if self.bank_combo.count() > 0:
+            self.bank_combo.setCurrentIndex(0)
+
     def manage_cost_types(self):
-        """Open the Cost Type management dialog."""
         from ui.components.universal_crud_dialog import UniversalCRUDDialog
         from services.cost_type_service import CostTypeService
-        
         dialog = UniversalCRUDDialog('cost_type', CostTypeService, self)
         if dialog.exec():
-            self.load_cost_types()  # Refresh the combo box
-    
+            self.load_cost_types()
+
     def get_data(self):
-        """Return the cost data as a dict."""
+        paid = self.paid_checkbox.isChecked()
         return {
             "cost_type_id": self.type_combo.currentData(),
             "cost_type_name": self.type_combo.currentText().strip(),
             "amount": self.amount_spin.value(),
+            "paid": paid,
+            "bank_account_id": self.bank_combo.currentData() if paid else None,
+            "bank_account_name": self.bank_combo.currentText() if paid else None,
+            "payment_date": self.payment_date_edit.date().toPython() if paid else None,
         }
-    
+
     def validate_inputs(self):
-        """Validate the inputs."""
         if not self.type_combo.currentText().strip():
             QMessageBox.warning(self, "Validation", "Cost Type is required.")
             return False
         if self.amount_spin.value() <= 0:
             QMessageBox.warning(self, "Validation", "Amount must be greater than 0.")
             return False
+        if self.paid_checkbox.isChecked() and self.bank_combo.currentData() is None:
+            QMessageBox.warning(self, "Validation", "Please select a bank account for payment.")
+            return False
         return True
-    
+
     def accept(self):
-        """Validate before closing."""
         if self.validate_inputs():
             super().accept()
+
+    def on_paid_toggled(self, checked):
+        self.paid_group.setVisible(checked)
+        self.adjustSize()
