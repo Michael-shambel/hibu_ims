@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QColor
 from .cost_item_dialog import AddCostItemDialog
+from ui.pages.product_dialog import ModernLineEdit
 
 class Tab2SetupMixin:
     """Contains setup_tab2 and cost management methods."""
@@ -165,6 +166,34 @@ class Tab2SetupMixin:
     # ------------------------------------------------------------------
     def open_add_cost_dialog(self):
         """Open the add cost item dialog."""
+        # Check if there are any products in the product table
+        row_count = self.product_table.rowCount()
+        has_products = False
+        for row in range(row_count):
+            # Skip the summary row (if any)
+            if self.product_table.item(row, 0) and self.product_table.item(row, 0).text() == "TOTAL":
+                continue
+            # Check product name column (column 1)
+            name_widget = self.product_table.cellWidget(row, 1)
+            if name_widget and isinstance(name_widget, ModernLineEdit):
+                if name_widget.text().strip():
+                    has_products = True
+                    break
+            else:
+                name_item = self.product_table.item(row, 1)
+                if name_item and name_item.text().strip():
+                    has_products = True
+                    break
+
+        if not has_products:
+            QMessageBox.warning(
+                self,
+                "No Products",
+                "Please add at least one product to the shipment before adding costs.\n"
+                "Costs are allocated proportionally based on product quantities."
+            )
+            return
+
         dialog = AddCostItemDialog(self.cost_type_service, self)
         if dialog.exec() == QDialog.Accepted:
             data = dialog.get_data()

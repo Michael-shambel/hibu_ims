@@ -9,18 +9,23 @@ class ShipmentStatusEnum(str, Enum):
     APPROVED = "approved"
     CANCELLED = "cancelled"
 
+class PaymentStatusEnum(str, Enum):
+    PAID = "paid"
+    CREDIT = "credit"
+
 
 class ImportShipment(BaseModel):
     __tablename__ = "import_shipments"
 
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False)
-    bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=False)
+    bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
     proforma_date = Column(Date, nullable=False)
     exchange_rate = Column(Float, nullable=False)
     status = Column(SQLEnum(ShipmentStatusEnum), nullable=False, default=ShipmentStatusEnum.DRAFT)
     created_by_user_id = Column(Integer, ForeignKey("auth_users.id"), nullable=False)
     target_margin = Column(Float, nullable=True, default=20.0)
     allocation_mode = Column(String(20), nullable=True, default="used_cbm")
+    payment_status = Column(String(20), nullable=False, default=PaymentStatusEnum.CREDIT.value)
 
 
     supplier = relationship("Supplier", foreign_keys=[supplier_id])

@@ -15,7 +15,7 @@ from ui.components.universal_crud_dialog import UniversalCRUDDialog
 from services.supplier_service import SupplierService
 from services.bank_account_service import BankAccountService
 from services.new_product_service import NewProductService
-from services.import_shipment_service import ImportShipmentService
+from services.import_shipment_service import ImportShipmentService, PaymentStatusEnum
 from services.cost_type_service import CostTypeService
 
 from .preview_dialog import ExcelPreviewDialog
@@ -49,11 +49,16 @@ class ImportShipmentDialog(
         self.cost_type_service = CostTypeService()
         self._updating = False
         self.current_basis = "qty"
-        self.allocation_mode = "used_cbm"  # <-- NEW
-        self.container_capacity = 68.0      # <-- NEW
+        self.allocation_mode = "used_cbm"
+        self.container_capacity = 68.0
         self.dead_freight = 0.0
         self.products_data = []
         self.landed_results = []
+        self.basic_info = None   # <-- NEW: store supplier, bank, date, payment_status
+
+        # self.bank_combo = ModernComboBox("LC Bank", parent=self)
+        # self.bank_combo.combo_box.setEditable(True)
+        # self.bank_combo.combo_box.lineEdit().setPlaceholderText("Select or type bank...")
 
         # Enable minimize and maximize buttons
         self.setWindowFlags(
@@ -71,8 +76,7 @@ class ImportShipmentDialog(
         self.setGeometry(screen_geometry)
 
         self.init_ui()
-        self.populate_suppliers()
-        self.populate_banks()
+        # No populate_suppliers / populate_banks calls needed anymore
 
         if shipment_id:
             self.load_shipment(shipment_id)
@@ -332,15 +336,25 @@ class ImportShipmentDialog(
 
     def save_shipment(self):
         """Validate and save the shipment (create or update)."""
-        # Validate fields (unchanged)
-        supplier_id = self.supplier_combo.currentData()
+        if not self.basic_info:
+            QMessageBox.warning(self, "Validation", "Please set supplier and payment details first.")
+            return
+
+        supplier_id = self.basic_info.get('supplier_id')
+        proforma_date = self.basic_info.get('proforma_date')
+        payment_status = self.basic_info.get('payment_status', 'credit')
+        bank_id = self.basic_info.get('bank_account_id')   # from dialog
+
         if not supplier_id:
             QMessageBox.warning(self, "Validation", "Please select a supplier.")
             return
+        if not proforma_date:
+            QMessageBox.warning(self, "Validation", "Please set a proforma date.")
+            return
 
-        bank_id = self.bank_combo.currentData()
-        if not bank_id:
-            QMessageBox.warning(self, "Validation", "Please select a bank account.")
+        # LC Bank: required only when PAID
+        if payment_status == "paid" and not bank_id:
+            QMessageBox.warning(self, "Validation", "Please select a bank account for paid shipment.")
             return
 
         exchange_rate = self.rate_spin.spin_box.value()
@@ -363,24 +377,24 @@ class ImportShipmentDialog(
 
         data = {
             "supplier_id": supplier_id,
-            "bank_account_id": bank_id,
-            "proforma_date": self.date_edit.date().toPython(),
+            "bank_account_id": bank_id,           # may be None
+            "proforma_date": proforma_date,
             "exchange_rate": exchange_rate,
             "created_by_user_id": user_id,
             "products": products,
             "costs": costs,
             "target_margin": target_margin,
             "allocation_mode": self.allocation_mode,
+            "payment_status": payment_status,
+            "payment_date": proforma_date,
         }
 
         try:
             service = ImportShipmentService()
             if self.shipment_id:
-                # Update existing shipment
                 shipment = service.update_shipment(self.shipment_id, data)
                 msg = f"Shipment #{shipment.id} updated."
             else:
-                # Create new shipment
                 shipment = service.create_shipment(data)
                 msg = f"Shipment #{shipment.id} saved as DRAFT."
 
@@ -434,7 +448,6 @@ class ImportShipmentDialog(
         self.save_btn.setVisible(not enabled)
 
     def load_shipment(self, shipment_id):
-        """Load an existing shipment into the UI for editing or viewing."""
         from PySide6.QtCore import QDate
         from PySide6.QtWidgets import QTableWidgetItem
         from services.import_shipment_service import ImportShipmentService
@@ -446,28 +459,23 @@ class ImportShipmentDialog(
             self.reject()
             return
 
-        # --- Set window title and save button text based on mode ---
         if self.mode == "view":
             self.setWindowTitle(f"View Shipment #{shipment_id}")
-            # Save button will be hidden by set_read_only(True)
         else:
             self.setWindowTitle(f"Edit Shipment #{shipment_id}")
-            self.save_btn.setText("💾 Update Draft")   # change button text
+            self.save_btn.setText("💾 Update Draft")
 
-        # --- Populate basic info ---
-        self.supplier_combo.setCurrentIndex(
-            self.supplier_combo.findData(shipment.supplier_id)
-        )
-        self.bank_combo.setCurrentIndex(
-            self.bank_combo.findData(shipment.bank_account_id)
-        )
-        self.date_edit.setDate(
-            QDate(
-                shipment.proforma_date.year,
-                shipment.proforma_date.month,
-                shipment.proforma_date.day
-            )
-        )
+        # Basic info (now includes bank_account_id)
+        self.basic_info = {
+            "supplier_id": shipment.supplier_id,
+            "payment_status": shipment.payment_status,
+            "proforma_date": shipment.proforma_date,
+            "bank_account_id": shipment.bank_account_id,   # may be None
+        }
+        self.update_basic_info_summary()
+
+        # (Bank combo removed – no need to set anything)
+
         self.rate_spin.spin_box.setValue(shipment.exchange_rate)
         self.target_margin_spin.setValue(shipment.target_margin or 20.0)
 
@@ -478,7 +486,7 @@ class ImportShipmentDialog(
         else:
             self.used_cbm_radio.setChecked(True)
 
-        # --- Load products (batch mode) ---
+        # Load products
         self.product_table.setRowCount(0)
         for product in shipment.products:
             if not product.is_deleted:
@@ -491,10 +499,9 @@ class ImportShipmentDialog(
                     "unit_price_rmb": product.unit_price_rmb,
                     "cbm_per_carton": product.cbm_per_carton,
                 }
-                # ✅ Pass False to skip recalculating after each row
                 self.add_product_row_to_table(data, trigger_calculation=False)
 
-        # --- Load costs (no change needed, they don't trigger heavy calc) ---
+        # Load costs
         self.cost_table.setRowCount(0)
         for cost in shipment.costs:
             if not cost.is_deleted:
@@ -505,17 +512,13 @@ class ImportShipmentDialog(
                 }
                 self.add_cost_row(data)
 
-        # ✅ Run the calculation ONCE after all products are loaded
         self.calculate_landed()
 
-        # --- Restore market prices from the shipment products ---
+        # Restore market prices
         if shipment.products:
-            # Build a map of product_name -> market_price from the shipment
             market_price_map = {
                 p.product_name: p.market_price for p in shipment.products if p.product_name
             }
-
-            # Iterate over the landed table rows and set market price if we have a match
             for row in range(self.landed_table.rowCount()):
                 name_item = self.landed_table.item(row, 0)
                 if name_item:
@@ -524,12 +527,11 @@ class ImportShipmentDialog(
                         price = market_price_map[product_name] or 0.0
                         self.landed_table.setItem(row, 9, QTableWidgetItem(f"{price:,.2f}"))
 
-            # Recalculate implied margins and profit summary (since market prices changed)
             self.calculate_implied_margins()
             self.update_profit_summary()
             self.apply_landed_table_styling()
 
-        # --- Determine mode based on status ---
+        # Read-only mode
         if shipment.status.value in ("approved", "cancelled"):
             self.mode = "view"
             self.set_read_only(True)

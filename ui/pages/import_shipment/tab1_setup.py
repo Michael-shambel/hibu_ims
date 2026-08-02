@@ -4,73 +4,57 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QMessageBox, QLineEdit, QRadioButton,
     QSpinBox, QFormLayout, QGroupBox, QWidget, QApplication, QTabWidget
 )
-from ui.pages.product_dialog import ModernComboBox, ModernDoubleSpinBox, ModernLineEdit, ModernSpinBox, ProductCompleter
+from ui.pages.product_dialog import (
+    ModernComboBox, ModernDoubleSpinBox, ModernLineEdit, ModernSpinBox,
+    ProductCompleter, PurchaseDetailsDialog
+)
 from ui.components.ethiopian_date import EthiopianDateEdit
 from .add_product_dialog import AddProductLineDialog
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QFont, QColor
 
 from ui.pages.product_dialog import ModernLineEdit, ProductCompleter
+from services.supplier_service import SupplierService
+from services.bank_account_service import BankAccountService
 
 class Tab1SetupMixin:
     """Contains setup_tab1 and product table methods."""
 
-    # ------------------------------------------------------------------
-    # Tab 1: Shipment Details (existing code)
-    # ------------------------------------------------------------------
     def setup_tab1(self):
         """Build Tab 1: Shipment Details."""
         tab1 = QWidget()
         layout = QVBoxLayout(tab1)
 
-        # ---- Basic Information Section ----
+        # ---- Basic Information Section (Compact) ----
         header_group = QGroupBox("Basic Information")
         header_layout = QFormLayout(header_group)
 
-        # Supplier: ModernComboBox + Add button
-        supplier_container = QWidget()
-        supplier_layout = QHBoxLayout(supplier_container)
-        supplier_layout.setContentsMargins(0, 0, 0, 0)
-        supplier_layout.setSpacing(5)
-
-        self.supplier_combo = ModernComboBox("Supplier")
-        self.supplier_combo.combo_box.setEditable(True)
-        self.supplier_combo.combo_box.lineEdit().setPlaceholderText("Select or type supplier...")
-        supplier_layout.addWidget(self.supplier_combo, 1)
-
-        self.add_supplier_btn = QPushButton("+")
-        self.add_supplier_btn.setFixedSize(45, 45)
-        self.add_supplier_btn.setStyleSheet("""
+        # ---- Button to open the PurchaseDetailsDialog (supplier, payment status, bank, date) ----
+        self.basic_info_btn = QPushButton("📋 Set Supplier & Payment Details")
+        self.basic_info_btn.setMinimumHeight(40)
+        self.basic_info_btn.setStyleSheet("""
             QPushButton {
-                background-color: #3498db; color: white;
-                border: none; border-radius: 8px; font-weight: bold; font-size: 18px;
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 8px 16px;
             }
             QPushButton:hover { background-color: #2980b9; }
         """)
-        self.add_supplier_btn.clicked.connect(self.open_supplier_dialog)
-        supplier_layout.addWidget(self.add_supplier_btn)
+        self.basic_info_btn.clicked.connect(self.open_basic_info_dialog)
 
-        header_layout.addRow("Supplier:", supplier_container)
+        # Summary label (will show selected details)
+        self.basic_info_summary = QLabel("No supplier/payment details set. Click the button above.")
+        self.basic_info_summary.setWordWrap(True)
+        self.basic_info_summary.setStyleSheet("color: #7f8c8d; font-size: 12px;")
 
-        # Bank: ModernComboBox
-        bank_container = QWidget()
-        bank_layout = QHBoxLayout(bank_container)
-        bank_layout.setContentsMargins(0, 0, 0, 0)
-        bank_layout.setSpacing(5)
+        header_layout.addRow(self.basic_info_btn)
+        header_layout.addRow(self.basic_info_summary)
 
-        self.bank_combo = ModernComboBox("LC Bank")
-        self.bank_combo.combo_box.setEditable(True)
-        self.bank_combo.combo_box.lineEdit().setPlaceholderText("Select or type bank...")
-        bank_layout.addWidget(self.bank_combo, 1)
-
-        header_layout.addRow("LC Bank:", bank_container)
-
-        # Proforma Date: EthiopianDateEdit
-        self.date_edit = EthiopianDateEdit()
-        self.date_edit.setDate(QDate.currentDate())
-        header_layout.addRow("Proforma Date:", self.date_edit)
-
-        # Exchange Rate: ModernDoubleSpinBox
+        # Exchange Rate: ModernDoubleSpinBox (keep visible)
         self.rate_spin = ModernDoubleSpinBox("Exchange Rate", 0.01, 200.0, 4, "")
         self.rate_spin.spin_box.setValue(17.85)
         self.rate_spin.spin_box.setPrefix("1 RMB = ")
@@ -80,7 +64,7 @@ class Tab1SetupMixin:
 
         layout.addWidget(header_group)
 
-        # ---- Product Table ----
+        # ---- Product Table (unchanged) ----
         products_group = QGroupBox("Products")
         products_layout = QVBoxLayout(products_group)
 
@@ -92,7 +76,7 @@ class Tab1SetupMixin:
             "Qty/Carton", "Total Qty", "Unit Price (RMB)",
             "Total Amount (RMB)", "CBM/Carton", "Total CBM"
         ])
-        # Set column widths
+        # Set column widths (unchanged)
         self.product_table.setColumnWidth(0, 100)
         self.product_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.product_table.setColumnWidth(2, 70)
@@ -110,7 +94,7 @@ class Tab1SetupMixin:
         self.product_table.itemChanged.connect(self.on_table_item_changed)
         products_layout.addWidget(self.product_table)
 
-        # ---- Product Toolbar ----
+        # ---- Product Toolbar (unchanged) ----
         prod_btn_layout = QHBoxLayout()
         self.add_prod_btn = QPushButton("➕ Add Product")
         self.add_prod_btn.setMinimumHeight(40)
@@ -244,7 +228,66 @@ class Tab1SetupMixin:
         layout.addWidget(products_group)
         self.tabs.addTab(tab1, "📄 Shipment Details")
 
+    # ---- Open PurchaseDetailsDialog for supplier, payment status, bank, and date ----
+    def open_basic_info_dialog(self):
+        """Open the PurchaseDetailsDialog to set supplier, payment status, bank, and date."""
+        supplier_service = SupplierService()
+        bank_service = BankAccountService()
 
+        dialog = PurchaseDetailsDialog(
+            supplier_service=supplier_service,
+            bank_account_service=bank_service,
+            parent=self
+        )
+        if dialog.exec() == QDialog.Accepted:
+            details = dialog.get_details()
+            self.basic_info = {
+                "supplier_id": details["supplier_id"],
+                "payment_status": details["payment_status"],   # "paid" or "credit"
+                "proforma_date": details["payment_date"],      # QDate or datetime
+                "bank_account_id": details["bank_account_id"], # may be None
+            }
+            self.update_basic_info_summary()
+
+    def update_basic_info_summary(self):
+        """Update the summary label with the selected details."""
+        if not hasattr(self, 'basic_info') or not self.basic_info:
+            self.basic_info_summary.setText("No supplier/payment details set. Click the button above.")
+            self.basic_info_summary.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+            return
+
+        info = self.basic_info
+        supplier_id = info.get('supplier_id')
+        payment_status = info.get('payment_status', 'credit').capitalize()
+        date_obj = info.get('proforma_date')
+        bank_id = info.get('bank_account_id')
+
+        supplier_name = self._get_supplier_name(supplier_id)
+        date_str = date_obj.strftime("%d/%m/%Y") if date_obj else "N/A"
+        bank_name = self._get_bank_name(bank_id) if bank_id else "Not set"
+
+        summary = f"Supplier: {supplier_name}  |  Status: {payment_status}  |  Date: {date_str}  |  Bank: {bank_name}"
+        self.basic_info_summary.setText(summary)
+        self.basic_info_summary.setStyleSheet("color: #2c3e50; font-size: 12px; font-weight: bold;")
+
+    def _get_supplier_name(self, supplier_id):
+        if not supplier_id:
+            return "N/A"
+        supplier = SupplierService().get_by_id(supplier_id)
+        return supplier.supplier_name if supplier else f"ID {supplier_id}"
+
+    def _get_bank_name(self, bank_id):
+        if not bank_id:
+            return "N/A"
+        bank = BankAccountService().get_by_id(bank_id)
+        if bank:
+            return f"{bank.bank_name} - {bank.account_name}"
+        return f"ID {bank_id}"
+
+    # ---- All other methods (add_product_row_to_table, remove_selected_product, ...) ----
+    # Keep them exactly as they are in your original file – no changes required.
+    # I have included them below for completeness, but they are unchanged.
+    # ------------------------------------------------------------------
     def add_product_row_to_table(self, data, trigger_calculation=True):
         """Add a product row to the table using the provided data."""
         self.product_table.blockSignals(True)
