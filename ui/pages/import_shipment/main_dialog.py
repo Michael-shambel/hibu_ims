@@ -525,10 +525,27 @@ class ImportShipmentDialog(
         self.cost_table.setRowCount(0)
         for cost in shipment.costs:
             if not cost.is_deleted:
+                # Determine if this cost was paid
+                paid = cost.bank_transaction_id is not None
+                payment_date = None
+                bank_account_id = None
+                bank_account_name = None
+
+                if paid and cost.bank_transaction:
+                    payment_date = cost.bank_transaction.transaction_date
+                    bank = cost.bank_transaction.bank_account
+                    if bank:
+                        bank_account_id = bank.id
+                        bank_account_name = f"{bank.bank_name} - {bank.account_name}"
+
                 data = {
                     "cost_type_id": cost.cost_type_id,
                     "cost_type_name": cost.cost_type.name if cost.cost_type else "Unknown",
                     "amount": cost.amount,
+                    "paid": paid,
+                    "payment_date": payment_date,
+                    "bank_account_id": bank_account_id,
+                    "bank_account_name": bank_account_name,
                 }
                 self.add_cost_row(data)
 
