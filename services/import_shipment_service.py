@@ -106,7 +106,6 @@ class ImportShipmentService(BaseService):
                 if field not in data:
                     raise ValueError(f"Missing required field: {field}")
 
-            # Extract payment status (default CREDIT)
             payment_status = data.get('payment_status', PaymentStatusEnum.CREDIT.value)
             if payment_status not in [PaymentStatusEnum.PAID.value, PaymentStatusEnum.CREDIT.value]:
                 payment_status = PaymentStatusEnum.CREDIT.value
@@ -123,7 +122,7 @@ class ImportShipmentService(BaseService):
                 payment_status=payment_status
             )
             session.add(shipment)
-            session.flush()
+            session.flush()   # ensure shipment gets an ID
 
             # Save products
             for prod in data['products']:
@@ -143,6 +142,8 @@ class ImportShipmentService(BaseService):
                     cbm_per_carton=prod.get('cbm_per_carton', 0.0),
                     total_cbm=total_cbm,
                     market_price=prod.get('market_price', 0.0),
+                    landed_cost_per_unit=prod.get('landed_cost_per_unit', 0.0),   # <-- NEW
+                    target_selling_price=prod.get('target_selling_price', 0.0),   # <-- NEW
                 )
                 session.add(product)
 
@@ -154,13 +155,6 @@ class ImportShipmentService(BaseService):
                 total_qty = prod['cartons'] * prod['qty_per_carton']
                 total_fob_etb += total_qty * prod['unit_price_rmb'] * shipment.exchange_rate
 
-            if landed_data:
-                for sp in shipment.products:
-                    if sp.product_name in landed_data:
-                        ld = landed_data[sp.product_name]
-                        sp.landed_cost_per_unit = ld['landed_cost']
-                        sp.target_selling_price = ld['target_price']
-                        sp.market_price = ld.get('market_price')
             # Handle FOB payment if PAID
             affected_accounts = set()
             if payment_status == PaymentStatusEnum.PAID.value and total_fob_etb > 0:
@@ -169,12 +163,12 @@ class ImportShipmentService(BaseService):
                     shipment.id,
                     shipment.bank_account_id,
                     total_fob_etb,
-                    data.get('payment_date', shipment.proforma_date)  # use proforma date if payment_date not provided
+                    data.get('payment_date', shipment.proforma_date)
                 )
                 if fob_tx_id:
                     affected_accounts.add(shipment.bank_account_id)
 
-            # Save costs (existing logic)
+            # Save costs
             costs = data.get('costs', [])
             for cost in costs:
                 cost_type_id = cost.get('cost_type_id')
@@ -186,7 +180,6 @@ class ImportShipmentService(BaseService):
                         amount=amount
                     )
                     if cost.get('paid', False):
-                        # This may raise ValueError if insufficient funds
                         tx_id = self._create_bank_transaction_for_cost(
                             session, shipment.id, cost
                         )
@@ -231,13 +224,12 @@ class ImportShipmentService(BaseService):
                 new_payment_status = PaymentStatusEnum.CREDIT.value
             shipment.payment_status = new_payment_status
 
-            # Delete old products (unchanged)
+            # Delete old products
             for prod in shipment.products:
                 session.delete(prod)
 
-            # --- Handle FOB transaction ---
+            # Handle FOB transaction
             affected_accounts = set()
-            # Find old FOB transaction
             old_fob_tx = session.query(BankTransaction).filter(
                 BankTransaction.reference_number == f"SHIP-FOB-{shipment_id}",
                 BankTransaction.is_deleted == False
@@ -246,7 +238,7 @@ class ImportShipmentService(BaseService):
                 old_fob_tx.is_deleted = True
                 affected_accounts.add(old_fob_tx.bank_account_id)
 
-            # --- Delete old costs and their transactions ---
+            # Delete old costs and their transactions
             for cost in shipment.costs:
                 if cost.bank_transaction_id:
                     tx = session.query(BankTransaction).filter(
@@ -258,7 +250,7 @@ class ImportShipmentService(BaseService):
                         affected_accounts.add(tx.bank_account_id)
                 session.delete(cost)
 
-            # Add new products (unchanged)
+            # Add new products
             for prod in data['products']:
                 if prod.get('cartons', 0) <= 0 or prod.get('qty_per_carton', 0) <= 0:
                     continue
@@ -276,6 +268,8 @@ class ImportShipmentService(BaseService):
                     cbm_per_carton=prod.get('cbm_per_carton', 0.0),
                     total_cbm=total_cbm,
                     market_price=prod.get('market_price', 0.0),
+                    landed_cost_per_unit=prod.get('landed_cost_per_unit', 0.0),   # <-- NEW
+                    target_selling_price=prod.get('target_selling_price', 0.0),   # <-- NEW
                 )
                 session.add(product)
 
@@ -286,14 +280,6 @@ class ImportShipmentService(BaseService):
                     continue
                 total_qty = prod['cartons'] * prod['qty_per_carton']
                 total_fob_etb += total_qty * prod['unit_price_rmb'] * shipment.exchange_rate
-
-            if landed_data:
-                for sp in shipment.products:
-                    if sp.product_name in landed_data:
-                        ld = landed_data[sp.product_name]
-                        sp.landed_cost_per_unit = ld['landed_cost']
-                        sp.target_selling_price = ld['target_price']
-                        sp.market_price = ld.get('market_price')
 
             # Create new FOB transaction if PAID
             if new_payment_status == PaymentStatusEnum.PAID.value and total_fob_etb > 0:

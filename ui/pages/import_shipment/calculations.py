@@ -237,7 +237,8 @@ class CalculationsMixin:
             self.landed_table.setItem(i, 6, QTableWidgetItem(f"{res['total_cost']:,.2f}"))
             # Col 7: Landed Unit (set by update_landed_table)
             # Col 8: Selling Price (set by calculate_selling_prices)
-            self.landed_table.setItem(i, 9, QTableWidgetItem("0.00"))  # Market Price default
+            if not self.landed_table.item(i, 9):
+                self.landed_table.setItem(i, 9, QTableWidgetItem("0.00"))
             # Col 10: Implied Margin (set by calculate_implied_margins)
 
         # Update header of landed unit column (col 7)

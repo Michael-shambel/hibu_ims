@@ -344,7 +344,7 @@ class ImportShipmentDialog(
         supplier_id = self.basic_info.get('supplier_id')
         proforma_date = self.basic_info.get('proforma_date')
         payment_status = self.basic_info.get('payment_status', 'credit')
-        bank_id = self.basic_info.get('bank_account_id')   # from dialog
+        bank_id = self.basic_info.get('bank_account_id')
 
         if not supplier_id:
             QMessageBox.warning(self, "Validation", "Please select a supplier.")
@@ -366,18 +366,93 @@ class ImportShipmentDialog(
             QMessageBox.warning(self, "Validation", "User not identified. Please log in again.")
             return
 
-        products = self.get_products_from_table()
+        costs = self.get_costs_from_table()
+        target_margin = self.target_margin_spin.value()
+
+        # ---- 2. Force recalculation to get latest landed costs ----
+        self.calculate_landed()
+
+        # Build lookup for landed cost per product
+        landed_lookup = {}
+        if hasattr(self, 'landed_results') and self.landed_results:
+            for res in self.landed_results:
+                product_name = res['name']
+                landed_cost = res['landed_qty'] if self.current_basis == 'qty' else res['landed_carton']
+                landed_lookup[product_name.strip()] = landed_cost
+
+        # ---- 3. Build products list with landed cost and target price ----
+        products = []
+        for row in range(self.product_table.rowCount()):
+            # Skip summary row
+            if self.product_table.item(row, 0) and self.product_table.item(row, 0).text() == "TOTAL":
+                continue
+
+            # Extract product data
+            item_number = self.product_table.item(row, 0).text().strip() if self.product_table.item(row, 0) else ""
+            name_widget = self.product_table.cellWidget(row, 1)
+            if isinstance(name_widget, ModernLineEdit):
+                product_name = name_widget.text().strip()
+            else:
+                name_item = self.product_table.item(row, 1)
+                product_name = name_item.text().strip() if name_item else ""
+            if not product_name:
+                continue
+
+            unit_combo = self.product_table.cellWidget(row, 2)
+            unit = unit_combo.currentText().strip() if isinstance(unit_combo, QComboBox) else "pcs"
+
+            try:
+                cartons = float(self.product_table.item(row, 3).text() or 0)
+                qty_per = float(self.product_table.item(row, 4).text() or 0)
+                unit_price_rmb = float(self.product_table.item(row, 6).text().replace(',', '') or 0)
+                cbm_per_carton = float(self.product_table.item(row, 8).text() or 0)
+            except ValueError:
+                continue
+            if cartons <= 0 or qty_per <= 0 or unit_price_rmb <= 0:
+                continue
+
+            # Get market price and target price from landed table
+            market_price = 0.0
+            target_price = 0.0
+            for r in range(self.landed_table.rowCount()):
+                name_item = self.landed_table.item(r, 0)
+                if name_item and name_item.text().strip() == product_name:
+                    market_item = self.landed_table.item(r, 9)
+                    if market_item:
+                        try:
+                            market_price = float(market_item.text().replace(',', ''))
+                        except ValueError:
+                            pass
+                    target_item = self.landed_table.item(r, 8)
+                    if target_item:
+                        try:
+                            target_price = float(target_item.text().replace(',', ''))
+                        except ValueError:
+                            pass
+                    break
+
+            prod_data = {
+                "item_number": item_number if item_number else None,
+                "product_name": product_name,
+                "unit": unit,
+                "cartons": int(cartons),
+                "qty_per_carton": int(qty_per),
+                "unit_price_rmb": unit_price_rmb,
+                "cbm_per_carton": cbm_per_carton,
+                "market_price": market_price,
+                "landed_cost_per_unit": landed_lookup.get(product_name.strip(), 0.0),
+                "target_selling_price": target_price,
+            }
+            products.append(prod_data)
+
         if not products:
             QMessageBox.warning(self, "Validation", "Please add at least one product.")
             return
 
-        costs = self.get_costs_from_table()
-        target_margin = self.target_margin_spin.value()
-
-        # ---- 2. Prepare shipment data ----
+        # ---- 4. Prepare shipment data ----
         data = {
             "supplier_id": supplier_id,
-            "bank_account_id": bank_id,           # may be None
+            "bank_account_id": bank_id,
             "proforma_date": proforma_date,
             "exchange_rate": exchange_rate,
             "created_by_user_id": user_id,
@@ -389,33 +464,14 @@ class ImportShipmentDialog(
             "payment_date": proforma_date,
         }
 
-        # ---- 3. Build landed_data from current calculation (Tab 3) ----
-        landed_data = {}
-        if hasattr(self, 'landed_results') and self.landed_results:
-            for idx, res in enumerate(self.landed_results):
-                product_name = res['name']
-                # Determine landed cost per unit based on current basis
-                landed_cost = res['landed_qty'] if self.current_basis == 'qty' else res['landed_carton']
-                # Target selling price – if you store it in res, use it; otherwise compute from margin
-                target_price_item = self.landed_table.item(idx, 8)
-                target_price = float(target_price_item.text().replace(',', '')) if target_price_item else 0.0
-                # Market price from table column 9 (index 9)
-                market_item = self.landed_table.item(idx, 9)
-                market_price = float(market_item.text().replace(',', '')) if market_item else 0.0
-                landed_data[product_name] = {
-                    'landed_cost': landed_cost,
-                    'target_price': target_price,
-                    'market_price': market_price
-                }
-
-        # ---- 4. Save via service ----
+        # ---- 5. Save via service ----
         try:
             service = ImportShipmentService()
             if self.shipment_id:
-                shipment = service.update_shipment(self.shipment_id, data, landed_data)
+                shipment = service.update_shipment(self.shipment_id, data)
                 msg = f"Shipment #{shipment.id} updated."
             else:
-                shipment = service.create_shipment(data, landed_data)
+                shipment = service.create_shipment(data)
                 msg = f"Shipment #{shipment.id} saved as DRAFT."
 
             if shipment:
