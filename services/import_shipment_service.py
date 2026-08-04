@@ -10,6 +10,12 @@ from models.bank_transactions import BankTransaction, TransactionDirectionEnum
 from services.base_service import BaseService, get_session
 from models.shipment_costs import ShipmentCost
 from services.bank_transaction_service import BankTransactionService
+from services.new_product_service import NewProductService
+from models.purchase_payment_term import PaymentStatusEnum
+from models.purchase_payment_transaction import PurchasePaymentTransaction, PaymentMethodEnum
+from models.purchase import Purchase
+from models.supplier_credit_ledger import SupplierCreditLedger
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +98,7 @@ class ImportShipmentService(BaseService):
     # ------------------------------------------------------------------
     # Create shipment (updated)
     # ------------------------------------------------------------------
-    def create_shipment(self, data: dict):
+    def create_shipment(self, data: dict, landed_data: dict = None):
         with get_session() as session:
             required = ['supplier_id', 'bank_account_id', 'proforma_date',
                         'exchange_rate', 'created_by_user_id', 'products']
@@ -142,14 +148,19 @@ class ImportShipmentService(BaseService):
 
             # Compute total FOB in ETB
             total_fob_etb = 0.0
-            # We need to iterate over products again after they are flushed; they are already added to session
-            # but we can compute from the data directly
             for prod in data['products']:
                 if prod.get('cartons', 0) <= 0 or prod.get('qty_per_carton', 0) <= 0:
                     continue
                 total_qty = prod['cartons'] * prod['qty_per_carton']
                 total_fob_etb += total_qty * prod['unit_price_rmb'] * shipment.exchange_rate
 
+            if landed_data:
+                for sp in shipment.products:
+                    if sp.product_name in landed_data:
+                        ld = landed_data[sp.product_name]
+                        sp.landed_cost_per_unit = ld['landed_cost']
+                        sp.target_selling_price = ld['target_price']
+                        sp.market_price = ld.get('market_price')
             # Handle FOB payment if PAID
             affected_accounts = set()
             if payment_status == PaymentStatusEnum.PAID.value and total_fob_etb > 0:
@@ -195,7 +206,7 @@ class ImportShipmentService(BaseService):
     # ------------------------------------------------------------------
     # Update shipment (updated)
     # ------------------------------------------------------------------
-    def update_shipment(self, shipment_id: int, data: dict):
+    def update_shipment(self, shipment_id: int, data: dict, landed_data: dict = None):
         with get_session() as session:
             shipment = session.query(self.model).filter(
                 self.model.id == shipment_id,
@@ -275,6 +286,14 @@ class ImportShipmentService(BaseService):
                     continue
                 total_qty = prod['cartons'] * prod['qty_per_carton']
                 total_fob_etb += total_qty * prod['unit_price_rmb'] * shipment.exchange_rate
+
+            if landed_data:
+                for sp in shipment.products:
+                    if sp.product_name in landed_data:
+                        ld = landed_data[sp.product_name]
+                        sp.landed_cost_per_unit = ld['landed_cost']
+                        sp.target_selling_price = ld['target_price']
+                        sp.market_price = ld.get('market_price')
 
             # Create new FOB transaction if PAID
             if new_payment_status == PaymentStatusEnum.PAID.value and total_fob_etb > 0:
@@ -398,3 +417,165 @@ class ImportShipmentService(BaseService):
             shipment.status = ShipmentStatusEnum.CANCELLED
             session.commit()
             return True
+
+
+    def stock_in(self, shipment_id: int, mapping: dict) -> Purchase:
+        """
+        mapping: {shipment_product_id: {'name': str, 'unit': str, 'use_market_price': bool}}
+        Returns the created Purchase object.
+        """
+        with get_session() as session:
+            shipment = session.query(ImportShipment).filter(
+                ImportShipment.id == shipment_id,
+                ImportShipment.is_deleted == False
+            ).with_for_update().first()
+            if not shipment:
+                raise ValueError("Shipment not found")
+            if shipment.status.value != "approved":
+                raise ValueError("Only approved shipments can be stocked in")
+            if shipment.stocked_in:
+                raise ValueError("Shipment already stocked in")
+
+            # For credit shipments, all costs must be paid (have bank transaction)
+            if shipment.payment_status == "credit":
+                unpaid_costs = [c for c in shipment.costs if c.bank_transaction_id is None]
+                if unpaid_costs:
+                    raise ValueError(f"All shipment costs must be paid. {len(unpaid_costs)} cost(s) are unpaid.")
+
+            # Build product data for NewProductService.create
+            products_data = []
+            for sp in shipment.products:
+                if sp.is_deleted:
+                    continue
+                map_data = mapping.get(sp.id)
+                if not map_data:
+                    raise ValueError(f"Product '{sp.product_name}' not mapped.")
+                name = map_data['name']
+                unit = map_data['unit']
+                use_market_price = map_data.get('use_market_price', False)
+
+                # Determine selling price
+                if use_market_price and sp.market_price:
+                    selling_price = sp.market_price
+                else:
+                    selling_price = sp.target_selling_price or 0.0
+
+                if sp.landed_cost_per_unit is None:
+                    raise ValueError(f"Landed cost missing for '{sp.product_name}'. Re‑approve shipment.")
+
+                products_data.append({
+                    'name': name,
+                    'unit': unit,
+                    'quantity': sp.cartons,                # number of packs (cartons)
+                    'dozen': sp.qty_per_carton,            # pieces per pack
+                    'cost_price': sp.landed_cost_per_unit, # per piece
+                    'selling_price': selling_price,
+                })
+
+            if not products_data:
+                raise ValueError("No valid products to stock in.")
+
+            # Prepare purchase data – same structure as used in ProductFormDialog
+            purchase_data = {
+                'supplier_id': shipment.supplier_id,
+                'payment_status': shipment.payment_status,  # 'paid' or 'credit'
+                'payment_method': None,                     # no new bank transaction
+                'bank_account_id': None,                    # no new bank transaction
+                'payment_date': shipment.proforma_date,
+                'user_id': shipment.created_by_user_id,
+                'products': products_data,
+                'created_at': datetime.now(),
+                'last_modified': datetime.now(),
+            }
+
+            # Use existing NewProductService.create – this handles purchase, batches, transactions, ledger
+            product_service = NewProductService()
+            purchase = product_service.create(purchase_data)
+            if not purchase:
+                raise ValueError("Failed to create purchase from shipment")
+
+            # Now link bank transactions and adjust payment term
+            payment_term = purchase.payment_terms[0]
+            total_amount = purchase.total_amount
+
+            if shipment.payment_status == "paid":
+                # Link all bank transactions (FOB + costs)
+                self._link_shipment_bank_transactions(session, shipment, payment_term)
+                payment_term.paid_amount = total_amount
+                payment_term.payment_status = PaymentStatusEnum.PAID
+            else:  # credit
+                # Link only cost transactions (non‑FOB)
+                paid_amount = self._link_cost_bank_transactions(session, shipment, payment_term)
+                payment_term.paid_amount = paid_amount
+                payment_term.update_status()  # sets PARTIAL or CREDIT
+
+            # Mark shipment as stocked in
+            shipment.stocked_in = True
+            shipment.purchase_id = purchase.id
+
+            session.commit()
+            return purchase
+
+    # ========== Helper methods ==========
+
+    def _link_shipment_bank_transactions(self, session, shipment, payment_term):
+        """Link FOB and cost transactions for paid shipments."""
+        # FOB transaction
+        fob_txs = session.query(BankTransaction).filter(
+            BankTransaction.reference_number == f"SHIP-FOB-{shipment.id}",
+            BankTransaction.is_deleted == False
+        ).all()
+        for tx in fob_txs:
+            tx.purchase_payment_term_id = payment_term.id
+            self._create_purchase_payment_from_bank_tx(session, tx, payment_term)
+
+        # Cost transactions
+        cost_txs = session.query(BankTransaction).join(ShipmentCost).filter(
+            ShipmentCost.shipment_id == shipment.id,
+            BankTransaction.is_deleted == False
+        ).all()
+        for tx in cost_txs:
+            tx.purchase_payment_term_id = payment_term.id
+            self._create_purchase_payment_from_bank_tx(session, tx, payment_term)
+
+    def _link_cost_bank_transactions(self, session, shipment, payment_term):
+        """Link only cost transactions for credit shipments, return total paid amount."""
+        paid_amount = 0.0
+        cost_txs = session.query(BankTransaction).join(ShipmentCost).filter(
+            ShipmentCost.shipment_id == shipment.id,
+            BankTransaction.is_deleted == False
+        ).all()
+        for tx in cost_txs:
+            tx.purchase_payment_term_id = payment_term.id
+            self._create_purchase_payment_from_bank_tx(session, tx, payment_term)
+            paid_amount += tx.amount
+        return paid_amount
+
+    def _create_purchase_payment_from_bank_tx(self, session, bank_tx, payment_term):
+        """Create a PurchasePaymentTransaction and SupplierCreditLedger entry."""
+        payment_tx = PurchasePaymentTransaction(
+            purchase_payments_term_id=payment_term.id,
+            payment_date=bank_tx.transaction_date,
+            payment_method=bank_tx.payment_method or PaymentMethodEnum.TRANSFER,
+            amount=bank_tx.amount,
+            bank_account_id=bank_tx.bank_account_id,
+            user_id=bank_tx.recorded_by_user_id,
+            bank_transaction_id=bank_tx.id,
+            notes="Auto‑linked from shipment payment"
+        )
+        session.add(payment_tx)
+        session.flush()
+
+        # Add ledger entry (credit to supplier)
+        ledger_entry = SupplierCreditLedger(
+            supplier_id=payment_term.purchase.supplier_id,
+            purchase_id=payment_term.purchase_id,
+            payment_transaction_id=payment_tx.id,
+            bank_transaction_id=bank_tx.id,
+            entry_date=payment_tx.payment_date,
+            entry_type='payment',
+            description=f"Payment from shipment (purchase #{payment_term.purchase_id})",
+            debit=0.0,
+            credit=payment_tx.amount,
+        )
+        session.add(ledger_entry)

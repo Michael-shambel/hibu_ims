@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QLineEdit, QComboBox, QFrame, QGraphicsDropShadowEffect,
-    QSizePolicy, QStackedWidget
+    QSizePolicy, QStackedWidget, QDialog
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QColor
@@ -436,6 +436,7 @@ class ImportShipmentPage(QWidget):
             id_item.setData(Qt.DisplayRole, shipment.id)
             id_item.setTextAlignment(Qt.AlignCenter)
             id_item.setData(Qt.UserRole, shipment.id)
+            id_item.setData(Qt.UserRole + 1, shipment.stocked_in)
             self.table.setItem(row, 0, id_item)
 
             # Supplier
@@ -493,11 +494,11 @@ class ImportShipmentPage(QWidget):
             self.table.setItem(row, 7, status_item)
 
             status_value = shipment.status.value if shipment.status else "draft"
-            self.table.setCellWidget(row, 8, self.build_action_widget(shipment.id, status_value))
+            self.table.setCellWidget(row, 8, self.build_action_widget(shipment.id, status_value, shipment.stocked_in))
 
         self.table.setSortingEnabled(True)
 
-    def build_action_widget(self, shipment_id, status):
+    def build_action_widget(self, shipment_id, status, stocked_in=False):
         """
         Return a widget with action buttons.
         status: "draft", "approved", or "cancelled"
@@ -518,6 +519,10 @@ class ImportShipmentPage(QWidget):
             view_btn = make_row_action_button("👁", "View shipment", "#3498db", "#2980b9")
             view_btn.clicked.connect(lambda: self.open_shipment_dialog(shipment_id, True))
             layout.addWidget(view_btn)
+            if not stocked_in:
+                stock_btn = make_row_action_button("📦", "Stock In", "#27ae60", "#219a52")
+                stock_btn.clicked.connect(lambda: self.stock_in_shipment(shipment_id))
+                layout.addWidget(stock_btn)
 
         # ---- Approve button (only for draft) ----
         if status == "draft":
@@ -698,3 +703,25 @@ class ImportShipmentPage(QWidget):
             self.refresh()
         except Exception as e:
             QMessageBox.critical(self, "Cancel Failed", str(e))
+
+    def stock_in_shipment(self, shipment_id):
+        shipment = self.service.get_by_id_with_relations(shipment_id)
+        if not shipment:
+            QMessageBox.warning(self, "Error", "Shipment not found.")
+            return
+        if shipment.stocked_in:
+            QMessageBox.information(self, "Already Stocked", "This shipment has already been stocked in.")
+            return
+
+        from ui.pages.import_shipment.stock_in_dialog import StockInMappingDialog
+        from services.new_product_service import NewProductService
+
+        dialog = StockInMappingDialog(shipment, NewProductService(), self)
+        if dialog.exec() == QDialog.Accepted:
+            mapping = dialog.mapping_result
+            try:
+                purchase = self.service.stock_in(shipment_id, mapping)
+                QMessageBox.information(self, "Success", f"Stock‑in complete. Purchase #{purchase.id} created.")
+                self.refresh()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Stock‑in failed: {str(e)}")

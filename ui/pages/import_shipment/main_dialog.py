@@ -335,7 +335,8 @@ class ImportShipmentDialog(
             )
 
     def save_shipment(self):
-        """Validate and save the shipment (create or update)."""
+        """Validate and save the shipment (create or update) including landed costs."""
+        # ---- 1. Basic validation ----
         if not self.basic_info:
             QMessageBox.warning(self, "Validation", "Please set supplier and payment details first.")
             return
@@ -351,8 +352,6 @@ class ImportShipmentDialog(
         if not proforma_date:
             QMessageBox.warning(self, "Validation", "Please set a proforma date.")
             return
-
-        # LC Bank: required only when PAID
         if payment_status == "paid" and not bank_id:
             QMessageBox.warning(self, "Validation", "Please select a bank account for paid shipment.")
             return
@@ -375,6 +374,7 @@ class ImportShipmentDialog(
         costs = self.get_costs_from_table()
         target_margin = self.target_margin_spin.value()
 
+        # ---- 2. Prepare shipment data ----
         data = {
             "supplier_id": supplier_id,
             "bank_account_id": bank_id,           # may be None
@@ -389,13 +389,33 @@ class ImportShipmentDialog(
             "payment_date": proforma_date,
         }
 
+        # ---- 3. Build landed_data from current calculation (Tab 3) ----
+        landed_data = {}
+        if hasattr(self, 'landed_results') and self.landed_results:
+            for idx, res in enumerate(self.landed_results):
+                product_name = res['name']
+                # Determine landed cost per unit based on current basis
+                landed_cost = res['landed_qty'] if self.current_basis == 'qty' else res['landed_carton']
+                # Target selling price – if you store it in res, use it; otherwise compute from margin
+                target_price_item = self.landed_table.item(idx, 8)
+                target_price = float(target_price_item.text().replace(',', '')) if target_price_item else 0.0
+                # Market price from table column 9 (index 9)
+                market_item = self.landed_table.item(idx, 9)
+                market_price = float(market_item.text().replace(',', '')) if market_item else 0.0
+                landed_data[product_name] = {
+                    'landed_cost': landed_cost,
+                    'target_price': target_price,
+                    'market_price': market_price
+                }
+
+        # ---- 4. Save via service ----
         try:
             service = ImportShipmentService()
             if self.shipment_id:
-                shipment = service.update_shipment(self.shipment_id, data)
+                shipment = service.update_shipment(self.shipment_id, data, landed_data)
                 msg = f"Shipment #{shipment.id} updated."
             else:
-                shipment = service.create_shipment(data)
+                shipment = service.create_shipment(data, landed_data)
                 msg = f"Shipment #{shipment.id} saved as DRAFT."
 
             if shipment:

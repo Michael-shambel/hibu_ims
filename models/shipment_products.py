@@ -21,6 +21,8 @@ class ShipmentProduct(BaseModel):
     cbm_per_carton = Column(Float, nullable=False)
 
     total_cbm = Column(Float, nullable=False)
+    landed_cost_per_unit = Column(Float, nullable=True)    # ETB per piece
+    target_selling_price = Column(Float, nullable=True)    # from target margin
     market_price = Column(Float, nullable=True, default=0.0)
 
     shipment = relationship("ImportShipment", back_populates="products")
