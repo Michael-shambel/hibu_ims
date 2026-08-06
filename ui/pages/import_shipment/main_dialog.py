@@ -398,8 +398,11 @@ class ImportShipmentDialog(
             if not product_name:
                 continue
 
-            unit_combo = self.product_table.cellWidget(row, 2)
-            unit = unit_combo.currentText().strip() if isinstance(unit_combo, QComboBox) else "pcs"
+            unit_widget = self.product_table.cellWidget(row, 2)
+            if isinstance(unit_widget, ModernLineEdit):
+                unit = unit_widget.text().strip() or "pcs"
+            else:
+                unit = "pcs"
 
             try:
                 cartons = float(self.product_table.item(row, 3).text() or 0)
@@ -512,7 +515,7 @@ class ImportShipmentDialog(
                 name_widget.setEnabled(not enabled)
             # Disable the unit combo (column 2)
             unit_widget = self.product_table.cellWidget(row, 2)
-            if unit_widget and isinstance(unit_widget, QComboBox):
+            if unit_widget and isinstance(unit_widget, ModernLineEdit):
                 unit_widget.setEnabled(not enabled)
 
         # Cost table: disable editing

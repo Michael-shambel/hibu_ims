@@ -311,12 +311,10 @@ class Tab1SetupMixin:
         self.product_table.setCellWidget(row, 1, name_edit)
             
         # Column 2: Unit (ComboBox)
-        unit_combo = QComboBox()
-        unit_combo.addItems(["pcs", "kg", "set", "box", "m", "L"])
-        idx = unit_combo.findText(data.get("unit", "pcs"))
-        if idx >= 0:
-            unit_combo.setCurrentIndex(idx)
-        self.product_table.setCellWidget(row, 2, unit_combo)
+        unit_edit = ModernLineEdit("Unit", "pcs")
+        unit_edit.setText(data.get("unit", "pcs"))
+        unit_edit.setMinimumHeight(35)
+        self.product_table.setCellWidget(row, 2, unit_edit)
             
         # Column 3: Cartons
         self.product_table.setItem(row, 3, QTableWidgetItem(str(data["cartons"])))
@@ -626,15 +624,11 @@ class Tab1SetupMixin:
             self.add_product_row_to_table(data)
 
     def on_product_selected_in_table(self, row, product_id):
-        """When a product is selected from autocomplete in the main table, update the unit."""
         product = self.product_service.get_by_id(product_id)
         if product:
-            # Update the unit combo box in column 2
-            unit_combo = self.product_table.cellWidget(row, 2)
-            if unit_combo and isinstance(unit_combo, QComboBox):
-                idx = unit_combo.findText(product.unit or "pcs")
-                if idx >= 0:
-                    unit_combo.setCurrentIndex(idx)
+            unit_edit = self.product_table.cellWidget(row, 2)
+            if unit_edit and isinstance(unit_edit, ModernLineEdit):
+                unit_edit.setText(product.unit or "pcs")
 
     def update_total_display(self):
         """Update the total amount display (RMB and ETB)."""

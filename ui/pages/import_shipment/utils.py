@@ -91,9 +91,9 @@ class UtilsMixin:
                 continue
 
             # Get Unit from combo box in column 2
-            unit_combo = self.product_table.cellWidget(row, 2)
-            if isinstance(unit_combo, QComboBox):
-                unit = unit_combo.currentText().strip()
+            unit_widget = self.product_table.cellWidget(row, 2)
+            if isinstance(unit_widget, ModernLineEdit):
+                unit = unit_widget.text().strip()
             else:
                 unit = "pcs"
 
