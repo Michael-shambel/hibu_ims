@@ -67,37 +67,37 @@ class PurchaseService(BaseService[Purchase]):
             return total
     
     
-    def create_purchase_with_session(self, session: Session, data: dict) -> Purchase:
+    def create_purchase_with_session(self, session: Session, data: dict, from_shipment: bool = False) -> Purchase:
         purchase = Purchase(
             supplier_id=data['supplier_id'],
             total_amount=data['total_amount'],
             is_credit_sale=(data['payment_status'] == 'credit'),
             purchase_date=data.get('payment_date', date.today()),
-            created_at=data.get('created_at', date.today()),
-            last_modified=data.get('last_modified', date.today())
+            created_at=data.get('created_at', datetime.now()),
+            last_modified=data.get('last_modified', datetime.now())
         )
         session.add(purchase)
         session.flush()
 
         payment_status_enum = PaymentStatusEnum.PAID if data['payment_status'] == 'paid' else PaymentStatusEnum.CREDIT
-        paid_amount = data['total_amount'] if payment_status_enum == PaymentStatusEnum.PAID else 0.0
 
+        # Create payment term (paid_amount starts at 0)
         payment_term = PurchasePaymentTerm(
             purchase_id=purchase.id,
             payment_status=payment_status_enum,
             total_amount=data['total_amount'],
-            paid_amount=paid_amount,
-            created_at=data.get('created_at', date.today()),
-            last_modified=data.get('last_modified', date.today())
+            paid_amount=0.0,   # will be updated later if needed
+            created_at=data.get('created_at', datetime.now()),
+            last_modified=data.get('last_modified', datetime.now())
         )
         session.add(payment_term)
         session.flush()
 
-        # ✅ Ledger: Purchase entry (always, regardless of paid/credit)
+        # ✅ Ledger: Purchase entry (always)
         self.ledger_service.add_entry(
             session=session,
             supplier_id=purchase.supplier_id,
-            entry_date=purchase.purchase_date,
+            entry_date=purchase.purchase_date or date.today(),
             entry_type='purchase',
             description=f"Purchase #{purchase.id}",
             debit=data['total_amount'],
@@ -105,7 +105,10 @@ class PurchaseService(BaseService[Purchase]):
             purchase_id=purchase.id
         )
 
-        if payment_status_enum == PaymentStatusEnum.PAID:
+        # 🔥 Only create payment transaction & bank transaction if:
+        # 1) payment_status is PAID, AND
+        # 2) NOT from_shipment (i.e., normal purchase, not stock‑in)
+        if payment_status_enum == PaymentStatusEnum.PAID and not from_shipment:
             method_str = data.get('payment_method', 'cash').lower()
             try:
                 payment_method_enum = PaymentMethodEnum(method_str)
@@ -119,16 +122,15 @@ class PurchaseService(BaseService[Purchase]):
                 amount=data['total_amount'],
                 bank_account_id=data.get('bank_account_id'),
                 user_id=data.get('user_id'),
-                created_at=data.get('created_at', date.today()),
-                last_modified=data.get('last_modified', date.today())
+                created_at=data.get('created_at', datetime.now()),
+                last_modified=data.get('last_modified', datetime.now())
             )
             session.add(payment_transaction)
             session.flush()
 
             if data.get('bank_account_id'):
                 current_balance = self.bank_transaction_service.get_balance(data['bank_account_id'])
-                new_balance = current_balance - data['total_amount']
-                if new_balance < 0:
+                if current_balance < data['total_amount']:
                     raise ValueError("Insufficient funds in bank account")
                 bank_transaction = BankTransaction(
                     bank_account_id=data['bank_account_id'],
@@ -142,17 +144,17 @@ class PurchaseService(BaseService[Purchase]):
                     cheque_number=None,
                     purchase_payment_term_id=payment_term.id,
                     recorded_by_user_id=data.get('user_id'),
-                    created_at=data.get('created_at', date.today()),
-                    last_modified=data.get('last_modified', date.today())
+                    created_at=data.get('created_at', datetime.now()),
+                    last_modified=data.get('last_modified', datetime.now())
                 )
                 session.add(bank_transaction)
                 session.flush()
 
-                # ✅ Ledger: Payment entry for paid purchases
+                # ✅ Ledger: Payment entry (for normal purchases)
                 self.ledger_service.add_entry(
                     session=session,
                     supplier_id=purchase.supplier_id,
-                    entry_date=purchase.purchase_date,
+                    entry_date=purchase.purchase_date or date.today(),
                     entry_type='payment',
                     description=f"Payment for purchase #{purchase.id}",
                     debit=0.0,
@@ -160,9 +162,8 @@ class PurchaseService(BaseService[Purchase]):
                     purchase_id=purchase.id,
                     bank_transaction_id=bank_transaction.id
                 )
-
+                
                 self.bank_transaction_service.recalculate_balances_for_account(session, data['bank_account_id'])
-
         return purchase
     
     def create_credit_purchase(self, data: dict) -> Purchase:

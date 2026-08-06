@@ -26,11 +26,11 @@ class NewProductService(BaseService[ProfessionalProduct]):
         super().__init__(ProfessionalProduct)
         self.purchase_service = PurchaseService()
     
-    def create(self, data) -> Optional[ProfessionalProduct]:
+    def create(self, data):
         total_amount = sum(
-                p['quantity'] * p['cost_price'] * p.get('dozen', 1)
-                for p in data['products']
-            )
+            p['quantity'] * p['cost_price'] * p.get('dozen', 1)
+            for p in data['products']
+        )
         with get_session() as session:
             try:
                 purchase_data = {
@@ -40,13 +40,17 @@ class NewProductService(BaseService[ProfessionalProduct]):
                     'payment_method': data.get('payment_method'),
                     'bank_account_id': data.get('bank_account_id'),
                     'payment_date': data.get('payment_date', date.today()),
-                    # 'invoice_number': data.get('invoice_number'),
                     'user_id': data.get('user_id'),
-                    "created_at": data.get('created_at', datetime.now()),
-                    "last_modified": data.get('last_modified', datetime.now())
+                    'created_at': data.get('created_at', datetime.now()),
+                    'last_modified': data.get('last_modified', datetime.now()),
                 }
+                from_shipment = data.get('from_shipment', False)
 
-                purchase = self.purchase_service.create_purchase_with_session(session, purchase_data)
+                # Pass the flag to purchase creation
+                purchase = self.purchase_service.create_purchase_with_session(
+                    session, purchase_data, from_shipment=from_shipment
+                )
+
                 for prod_data in data['products']:
                     product = self._get_or_create_product(
                         session=session,
@@ -57,14 +61,13 @@ class NewProductService(BaseService[ProfessionalProduct]):
                         dozen=prod_data.get('dozen', 1),
                         user_id=data.get('user_id'),
                         created_at=data.get('created_at', datetime.now()),
-                        last_modified=data.get('last_modified', datetime.now())
-
+                        last_modified=data.get('last_modified', datetime.now()),
+                        supplier_sku=prod_data.get('supplier_sku')
                     )
-        
+
                     if not product:
                         raise Exception(f"Failed to create/find product: {prod_data['name']}")
-            
-                
+
                     batch = ProductBatch(
                         product_id=product.id,
                         purchase_id=purchase.id,
@@ -92,12 +95,8 @@ class NewProductService(BaseService[ProfessionalProduct]):
                     product.update_totals()
 
                 session.commit()
-                logger.info(
-                    f"Product '{product.name}' created"
-                    f"and RECEIVED transaction"
-                )
-
-                return product
+                logger.info(f"Purchase #{purchase.id} created with {len(data['products'])} products")
+                return purchase
 
             except ValueError as e:
                 session.rollback()
@@ -119,7 +118,8 @@ class NewProductService(BaseService[ProfessionalProduct]):
         dozen: float = 1.0,
         user_id: int = None,
         created_at: date = None,
-        last_modified: date = None
+        last_modified: date = None,
+        supplier_sku: str = None
     ) -> ProfessionalProduct:
         norm_name = normalize_string(name)
         norm_unit = normalize_string(unit)
@@ -136,6 +136,8 @@ class NewProductService(BaseService[ProfessionalProduct]):
                 product.dozen = dozen
             if product.user_id != user_id:
                 product.user_id = user_id
+            if product.supplier_sku != supplier_sku:
+                product.supplier_sku = supplier_sku
             return product
         
         product = ProfessionalProduct(
@@ -146,6 +148,7 @@ class NewProductService(BaseService[ProfessionalProduct]):
             selling_price=selling_price,
             dozen=dozen,
             user_id=user_id,
+            supplier_sku=supplier_sku,
             created_at=created_at if created_at else datetime.now(),
             last_modified=last_modified if last_modified else datetime.now()
         )

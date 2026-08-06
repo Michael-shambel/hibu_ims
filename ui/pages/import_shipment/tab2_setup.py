@@ -174,13 +174,13 @@ class Tab2SetupMixin:
             if self.product_table.item(row, 0) and self.product_table.item(row, 0).text() == "TOTAL":
                 continue
             # Check product name column (column 1)
-            name_widget = self.product_table.cellWidget(row, 1)
+            name_widget = self.product_table.cellWidget(row, 0)
             if name_widget and isinstance(name_widget, ModernLineEdit):
                 if name_widget.text().strip():
                     has_products = True
                     break
             else:
-                name_item = self.product_table.item(row, 1)
+                name_item = self.product_table.item(row, 0)
                 if name_item and name_item.text().strip():
                     has_products = True
                     break
