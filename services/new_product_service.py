@@ -207,21 +207,38 @@ class NewProductService(BaseService[ProfessionalProduct]):
                 logger.exception(f"Failed to add stock in: {e}")
                 return False
     
-    def search_products(self, query: str, limit: int = 10) -> List[dict]:
+    def search_products(self, query: str, limit: int = 10, include_supplier_sku: bool = False) -> List[dict]:
         """
+        Search products by name, and optionally by supplier_sku.
+        Returns list of dicts with id, name, unit, and supplier_sku (if requested).
         """
         if not query or not query.strip():
             return []
-        
+
         norm_query = normalize_string(query)
 
         with get_session() as session:
+            # Build filter conditions
+            conditions = [ProfessionalProduct.normalized_name.ilike(f"%{norm_query}%")]
+            if include_supplier_sku:
+                conditions.append(ProfessionalProduct.supplier_sku.ilike(f"%{query}%"))
+            
             products = session.query(ProfessionalProduct).filter(
-                ProfessionalProduct.normalized_name.ilike(f"%{norm_query}%"),
-                ProfessionalProduct.is_deleted == False
+                ProfessionalProduct.is_deleted == False,
+                or_(*conditions)
             ).limit(limit).all()
-            return [{"id": p.id, "name": p.name, "unit": p.unit} for p in products]
-                            
+
+            return [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "unit": p.unit,
+                    "supplier_sku": p.supplier_sku,
+                    "dozen": p.dozen,
+                    "selling_price": p.selling_price,
+                }
+                for p in products
+            ]                            
 
     def get_product_by_name(self, name: str, unit: str, session) -> Optional[ProfessionalProduct]:
         try:

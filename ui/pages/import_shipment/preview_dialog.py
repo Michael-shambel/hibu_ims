@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QColor
-from ui.pages.product_dialog import ModernLineEdit, ProductCompleter
+from ui.pages.product_dialog import ModernLineEdit, ProductCompleter, ShipmentProductCompleter
 
 class ExcelPreviewDialog(QDialog):
     """Dialog to preview Excel data and assign local names before import."""
@@ -14,6 +14,7 @@ class ExcelPreviewDialog(QDialog):
         super().__init__(parent)
         self.excel_data = excel_data
         self.product_service = product_service
+        self.row_unit_map = {}  # New: store unit per row when matched
         self.setWindowTitle("Preview Excel Data")
         self.setModal(True)
         self.setMinimumSize(1200, 650)
@@ -122,7 +123,7 @@ class ExcelPreviewDialog(QDialog):
         self.preview_table.setRowCount(len(self.excel_data))
         
         # --- Set default row height for ALL rows ---
-        self.preview_table.verticalHeader().setDefaultSectionSize(70)  # <-- LARGE ROWS
+        self.preview_table.verticalHeader().setDefaultSectionSize(70)
         
         total_cartons = 0
         total_qty = 0
@@ -139,10 +140,10 @@ class ExcelPreviewDialog(QDialog):
             
             # Column 2: Local Name (ModernLineEdit with Autocomplete)
             local_name_edit = ModernLineEdit("Local Name", "Type local product name...")
-            local_name_edit.setMinimumHeight(55)  # <-- TALL ENOUGH FOR EASY TYPING
+            local_name_edit.setMinimumHeight(55)
             
             # Set up the completer
-            completer = ProductCompleter(self.product_service, parent=self)
+            completer = ShipmentProductCompleter(self.product_service, parent=self)
             completer.setLineEdit(local_name_edit.line_edit)
             completer.productSelected.connect(lambda pid, r=row: self.on_local_name_selected(r, pid))
             local_name_edit.textChanged.connect(completer.update)
@@ -192,7 +193,7 @@ class ExcelPreviewDialog(QDialog):
         # --- Add Summary Row (Footer) ---
         footer_row = self.preview_table.rowCount()
         self.preview_table.insertRow(footer_row)
-        self.preview_table.setRowHeight(footer_row, 50)  # <-- SUMMARY ROW HEIGHT (slightly smaller)
+        self.preview_table.setRowHeight(footer_row, 50)
         
         bold_font = QFont("Segoe UI", 10, QFont.Bold)
         
@@ -201,6 +202,9 @@ class ExcelPreviewDialog(QDialog):
         summary_label.setFont(bold_font)
         summary_label.setBackground(QColor(230, 240, 255))
         self.preview_table.setItem(footer_row, 0, summary_label)
+
+        # ----- Auto-fill matching products BEFORE summary row spans -----
+        self._prefill_matching_products()
         
         # Span columns 1-2
         self.preview_table.setSpan(footer_row, 1, 1, 2)
@@ -221,32 +225,27 @@ class ExcelPreviewDialog(QDialog):
         amt_item = QTableWidgetItem(f"{total_amount:,.2f}")
         amt_item.setFont(bold_font)
         amt_item.setBackground(QColor(230, 240, 255))
-        amt_item.setForeground(QColor(39, 174, 96))  # Green
+        amt_item.setForeground(QColor(39, 174, 96))
         self.preview_table.setItem(footer_row, 7, amt_item)
         
         # T.CBM total
         cbm_item = QTableWidgetItem(f"{total_cbm:.3f}")
         cbm_item.setFont(bold_font)
         cbm_item.setBackground(QColor(230, 240, 255))
-        cbm_item.setForeground(QColor(52, 152, 219))  # Blue
+        cbm_item.setForeground(QColor(52, 152, 219))
         self.preview_table.setItem(footer_row, 9, cbm_item)
     
-    # ------------------------------------------------------------------
-    # Method called when a product is selected from autocomplete
-    # ------------------------------------------------------------------
     def on_local_name_selected(self, row, product_id):
-        """
-        Called when a product is selected from autocomplete.
-        You can auto-fill other fields here if needed.
-        """
+        """Called when a product is selected from autocomplete."""
         product = self.product_service.get_by_id(product_id)
         if product:
-            # Optionally, you could pre-fill the Unit field in the main table
-            # For now, we just store the selection
+            # Store the unit for this row so it can be carried over on import
+            self.row_unit_map[row] = product.unit or "pcs"
+            # Optionally you could also pre-fill other fields if needed
             pass
     
     def get_import_data(self):
-        """Extract the data from the table, including the local names."""
+        """Extract the data from the table, including the local names and units."""
         imported = []
         # Stop before the summary row (last row)
         for row in range(self.preview_table.rowCount() - 1):
@@ -264,14 +263,44 @@ class ExcelPreviewDialog(QDialog):
             unit_price = float(self.preview_table.item(row, 6).text()) if self.preview_table.item(row, 6) else 0.0
             cbm = float(self.preview_table.item(row, 8).text()) if self.preview_table.item(row, 8) else 0.0
             
-            # Use local_name (which may be empty) – do NOT fall back to item_code
+            # Retrieve the unit stored during auto-fill or from manual selection
+            unit = self.row_unit_map.get(row, "pcs")
+            
             imported.append({
                 "item_number": item_code,
-                "product_name": local_name,  # May be empty
-                "unit": "pcs",
+                "product_name": local_name,
+                "unit": unit,                          # Now includes the matched product's unit
                 "cartons": cartons,
                 "qty_per_carton": qty_per,
                 "unit_price_rmb": unit_price,
                 "cbm_per_carton": cbm,
             })
         return imported
+
+    def _prefill_matching_products(self):
+        """For each row, if the item number matches a product's supplier_sku, auto‑fill local name and store unit."""
+        for row in range(self.preview_table.rowCount()):
+            # Skip the summary row (last row)
+            if row == self.preview_table.rowCount() - 1:
+                continue
+            # Get item number from column 1
+            item_number_item = self.preview_table.item(row, 1)
+            if not item_number_item:
+                continue
+            item_number = item_number_item.text().strip()
+            if not item_number:
+                continue
+
+            # Search for product with that supplier_sku (exact match)
+            suggestions = self.product_service.search_products(item_number, limit=1, include_supplier_sku=True)
+            if suggestions:
+                product = suggestions[0]
+                # Store the unit for this row
+                self.row_unit_map[row] = product.get('unit', 'pcs')
+                
+                name_widget = self.preview_table.cellWidget(row, 2)
+                if name_widget and isinstance(name_widget, ModernLineEdit):
+                    # Block signals to prevent completer from firing
+                    name_widget.line_edit.blockSignals(True)
+                    name_widget.setText(product['name'])
+                    name_widget.line_edit.blockSignals(False)

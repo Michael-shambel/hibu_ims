@@ -28,6 +28,89 @@ logger = logging.getLogger(__name__)
 
 from PySide6.QtWidgets import QCompleter
 
+class ShipmentProductCompleter(QCompleter):
+    """
+    Completer for shipment contexts: shows supplier_sku if present,
+    and includes that in the suggestion text.
+    """
+    productSelected = Signal(int)
+
+    def __init__(self, product_service, parent=None):
+        super().__init__(parent)
+        self.product_service = product_service
+        self.model = QStandardItemModel()
+        self.setModel(self.model)
+        self.setCaseSensitivity(Qt.CaseInsensitive)
+        self.setFilterMode(Qt.MatchContains)
+        self.setCompletionRole(Qt.UserRole)
+        self.setMaxVisibleItems(10)
+
+        self.timer = QTimer()
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.fetch_suggestions)
+
+        self.line_edit = None
+        self.suggestion_data = {}
+
+        self.popup().clicked.connect(self.on_item_clicked)
+
+    def setLineEdit(self, line_edit):
+        self.line_edit = line_edit
+        line_edit.setCompleter(self)
+
+    def update(self, text):
+        self.setCompletionPrefix(text)
+        self.timer.start(300)
+
+    def fetch_suggestions(self):
+        text = self.completionPrefix()
+        if len(text) < 2:
+            self.model.clear()
+            self.popup().hide()
+            return
+
+        # Search with supplier_sku included
+        suggestions = self.product_service.search_products(
+            text, limit=10, include_supplier_sku=True
+        )
+        self.model.clear()
+
+        for s in suggestions:
+            # Build display text: show supplier_sku if present
+            if s.get('supplier_sku'):
+                display_text = f"{s['supplier_sku']} – {s['name']} ({s['unit']})"
+            else:
+                display_text = f"{s['name']} ({s['unit']})"
+
+            item = QStandardItem(display_text)
+            item.setData(s, Qt.UserRole)
+            self.model.appendRow(item)
+
+        if suggestions:
+            if self.line_edit:
+                self.popup().setModel(self.model)
+                rect = self.line_edit.rect()
+                bottom_left = self.line_edit.mapToGlobal(rect.bottomLeft())
+                popup_height = min(150, len(suggestions) * 25)
+                self.popup().setGeometry(bottom_left.x(), bottom_left.y(),
+                                          self.line_edit.width(), popup_height)
+                self.popup().show()
+                self.popup().raise_()
+        else:
+            self.popup().hide()
+
+    def on_item_clicked(self, index):
+        if not index.isValid():
+            return
+        item_data = index.data(Qt.UserRole)
+        if not item_data:
+            return
+
+        # Set the line edit text to the product name
+        self.line_edit.setText(item_data['name'])
+        # Emit signal with product id
+        self.productSelected.emit(item_data['id'])
+
 class ProductCompleter(QCompleter):
     productSelected = Signal(int)
 

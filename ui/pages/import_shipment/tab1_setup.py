@@ -13,7 +13,7 @@ from .add_product_dialog import AddProductLineDialog
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QFont, QColor
 
-from ui.pages.product_dialog import ModernLineEdit, ProductCompleter
+from ui.pages.product_dialog import ModernLineEdit, ProductCompleter, ShipmentProductCompleter
 from services.supplier_service import SupplierService
 from services.bank_account_service import BankAccountService
 
@@ -304,12 +304,12 @@ class Tab1SetupMixin:
         name_edit.setMinimumHeight(35)
            
         # Set up completer
-        completer = ProductCompleter(self.product_service, parent=self)
+        completer = ShipmentProductCompleter(self.product_service, parent=self)
         completer.setLineEdit(name_edit.line_edit)
         completer.productSelected.connect(lambda pid, r=row: self.on_product_selected_in_table(r, pid))
         name_edit.textChanged.connect(completer.update)
         self.product_table.setCellWidget(row, 1, name_edit)
-            
+
         # Column 2: Unit (ComboBox)
         unit_edit = ModernLineEdit("Unit", "pcs")
         unit_edit.setText(data.get("unit", "pcs"))
@@ -625,10 +625,15 @@ class Tab1SetupMixin:
 
     def on_product_selected_in_table(self, row, product_id):
         product = self.product_service.get_by_id(product_id)
-        if product:
-            unit_edit = self.product_table.cellWidget(row, 2)
-            if unit_edit and isinstance(unit_edit, ModernLineEdit):
-                unit_edit.setText(product.unit or "pcs")
+        print(f"DEBUG: Product: {product.name}, unit: '{product.unit}'")
+        if not product:
+            return
+        unit_widget = self.product_table.cellWidget(row, 2)
+        print(f"DEBUG: Unit widget found: {unit_widget is not None}")
+        if unit_widget and isinstance(unit_widget, ModernLineEdit):
+            unit_text = product.unit if product.unit else "pcs"
+            unit_widget.setText(unit_text)
+            print(f"DEBUG: After setText, widget text = '{unit_widget.text()}'")
 
     def update_total_display(self):
         """Update the total amount display (RMB and ETB)."""

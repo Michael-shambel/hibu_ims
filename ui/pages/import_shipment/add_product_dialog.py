@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
-from ui.pages.product_dialog import ModernLineEdit, ModernSpinBox, ModernDoubleSpinBox, ProductCompleter
+from ui.pages.product_dialog import ModernLineEdit, ModernSpinBox, ModernDoubleSpinBox, ProductCompleter, ShipmentProductCompleter
 class AddProductLineDialog(QDialog):
     """Dialog for adding a product line to the shipment."""
     
@@ -54,7 +54,7 @@ class AddProductLineDialog(QDialog):
         
         # Product Name (with autocomplete)
         self.name_input = ModernLineEdit("Product Name", "Start typing product name...")
-        self.completer = ProductCompleter(self.product_service, parent=self)
+        self.completer = ShipmentProductCompleter(self.product_service, parent=self)
         self.completer.setLineEdit(self.name_input.line_edit)
         self.completer.productSelected.connect(self.on_product_selected)
         self.name_input.textChanged.connect(self.completer.update)

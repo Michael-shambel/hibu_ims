@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
-from ui.pages.product_dialog import ModernLineEdit, ProductCompleter
+from ui.pages.product_dialog import ModernLineEdit, ProductCompleter, ShipmentProductCompleter
 from services.new_product_service import NewProductService
 from services.import_shipment_service import ImportShipmentService
 
@@ -17,6 +17,7 @@ class StockInMappingDialog(QDialog):
         self.setWindowTitle(f"Stock In – Shipment #{self.shipment_id}")
         self.setModal(True)
         self.mapping_result = None
+        self.selected_product_ids = {}
 
         # Reload shipment fresh from database
         service = ImportShipmentService()
@@ -81,7 +82,7 @@ class StockInMappingDialog(QDialog):
             name_edit = ModernLineEdit("Local Name", "Type product name...")
             name_edit.setText(sp.product_name)
             name_edit.setMinimumHeight(40)
-            completer = ProductCompleter(self.product_service, parent=self)
+            completer = ShipmentProductCompleter(self.product_service, parent=self)
             completer.setLineEdit(name_edit.line_edit)
             completer.productSelected.connect(lambda pid, r=row: self.on_product_selected(r, pid))
             name_edit.textChanged.connect(completer.update)
@@ -145,6 +146,7 @@ class StockInMappingDialog(QDialog):
             self.table.setCellWidget(row, 8, check_widget)
 
     def on_product_selected(self, row, product_id):
+        self.selected_product_ids[row] = product_id
         product = self.product_service.get_by_id(product_id)
         if product:
             unit_edit = self.table.cellWidget(row, 3)
@@ -165,25 +167,35 @@ class StockInMappingDialog(QDialog):
             unit = unit_widget.text().strip() if unit_widget else ""
             if not unit:
                 raise ValueError(f"Row {row+1}: Unit is required.")
-
-            # Get the checkbox from the container widget
             container = self.table.cellWidget(row, 8)
-            if container:
-                check = container.findChild(QCheckBox)
-                use_market = check.isChecked() if check else False
-            else:
-                use_market = False
-
+            use_market = container.findChild(QCheckBox).isChecked() if container else False
+            product_id = self.selected_product_ids.get(row)  # may be None if user typed name manually
+            
             mapping[sp.id] = {
                 'name': local_name,
                 'unit': unit,
-                'use_market_price': use_market
+                'use_market_price': use_market,
+                'product_id': product_id,  # optional, used for updating supplier_sku
             }
         return mapping
 
     def confirm_stock_in(self):
         try:
             self.mapping_result = self.get_mapping()
+            
+            # Update supplier_sku for products that have NULL and were selected
+            for sp_id, map_data in self.mapping_result.items():
+                product_id = map_data.get('product_id')
+                if not product_id:
+                    continue
+                product = self.product_service.get_by_id(product_id)
+                if product and product.supplier_sku is None:
+                    # Find the shipment product to get item number
+                    shipment_product = next((sp for sp in self.shipment.products if sp.id == sp_id), None)
+                    if shipment_product and shipment_product.item_number:
+                        # Update the product's supplier_sku
+                        self.product_service.update(product_id, {'supplier_sku': shipment_product.item_number})
+            
             self.accept()
         except ValueError as e:
             QMessageBox.warning(self, "Validation Error", str(e))
