@@ -172,11 +172,15 @@ class AddProductLineDialog(QDialog):
         self.update_preview()
     
     def on_product_selected(self, product_id):
-        """When a product is selected via autocomplete, fill unit."""
         product = self.product_service.get_by_id(product_id)
         if product:
+            # Fill Unit
             self.unit_input.setText(product.unit or "")
-    
+            # Fill Item Number (supplier_sku)
+            self.item_number_input.setText(product.supplier_sku or "")
+            # Fill Qty per Carton with product.dozen (pieces per dozen)
+            self.qty_per_input.setValue(int(product.dozen) if product.dozen else 1)
+        
     def update_preview(self):
         """Update the preview labels with current values."""
         try:

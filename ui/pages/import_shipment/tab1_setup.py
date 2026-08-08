@@ -634,12 +634,21 @@ class Tab1SetupMixin:
         print(f"DEBUG: Product: {product.name}, unit: '{product.unit}'")
         if not product:
             return
+
+        # Update Unit column (column 2)
         unit_widget = self.product_table.cellWidget(row, 2)
-        print(f"DEBUG: Unit widget found: {unit_widget is not None}")
         if unit_widget and isinstance(unit_widget, ModernLineEdit):
             unit_text = product.unit if product.unit else "pcs"
             unit_widget.setText(unit_text)
-            print(f"DEBUG: After setText, widget text = '{unit_widget.text()}'")
+
+        # Update Item # column (column 0)
+        if product.supplier_sku:
+            item_item = self.product_table.item(row, 0)
+            if item_item:
+                item_item.setText(product.supplier_sku)
+            else:
+                self.product_table.setItem(row, 0, QTableWidgetItem(product.supplier_sku))
+
 
     def update_total_display(self):
         """Update the total amount display (RMB and ETB)."""
