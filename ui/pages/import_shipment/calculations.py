@@ -16,7 +16,7 @@ class CalculationsMixin:
         """
         Recalculate landed cost allocation and update:
         - Tab 2: allocation matrix
-        - Tab 3: landed table, grand total, and pricing columns
+        - Tab 4: landed table, grand total, and pricing columns
         """
         # --- Step 1: Extract product data from the main table ---
         products = []
@@ -99,13 +99,12 @@ class CalculationsMixin:
             self.landed_results = []
             return
 
-        # --- Step 4: Determine allocation denominator once ---
+        # --- Step 4: Determine allocation denominator ---
         if self.allocation_mode == "fixed":
             allocation_denominator = self.container_capacity
         else:
             allocation_denominator = total_cbm_sum
 
-        # If denominator is zero, we can't allocate
         if allocation_denominator <= 0:
             self.alloc_table.setRowCount(0)
             self.alloc_table.setColumnCount(0)
@@ -122,34 +121,44 @@ class CalculationsMixin:
         for prod in products:
             allocs = []
             for cost in costs:
-                # Allocate cost proportionally by product CBM
                 allocated = (cost["amount"] / allocation_denominator) * prod["total_cbm"]
                 allocs.append(allocated)
 
             total_alloc = sum(allocs)
-            total_cost = (prod["total_quantity"] * prod["unit_price_rmb"] * self.rate_spin.spin_box.value()) + total_alloc
-            landed_qty = total_cost / prod["total_quantity"] if prod["total_quantity"] > 0 else 0
-            landed_carton = total_cost / prod["cartons"] if prod["cartons"] > 0 else 0
+            fob_etb = prod["total_quantity"] * prod["unit_price_rmb"] * self.rate_spin.spin_box.value()
+
+            # ---- ADD TAX PER PIECE TO TOTAL COST ----
+            tax_per_piece = self._tax_ps_values.get(prod["name"], 0.0)
+            total_tax = prod["total_quantity"] * tax_per_piece
+
+            # Total Cost = FOB + Allocation + Total Tax
+            total_cost_with_tax = fob_etb + total_alloc + total_tax
+
+            landed_qty = total_cost_with_tax / prod["total_quantity"] if prod["total_quantity"] > 0 else 0
+            landed_carton = total_cost_with_tax / prod["cartons"] if prod["cartons"] > 0 else 0
 
             product_allocations.append({
                 "name": prod["name"],
                 "allocations": allocs,
                 "total_alloc": total_alloc,
             })
+
             landed_results.append({
                 "name": prod["name"],
                 "cartons": prod["cartons"],
                 "qty_per_carton": prod["qty_per"],
                 "total_quantity": prod["total_quantity"],
-                "fob_etb": prod["total_quantity"] * prod["unit_price_rmb"] * self.rate_spin.spin_box.value(),
+                "fob_etb": fob_etb,
                 "allocated": total_alloc,
-                "total_cost": total_cost,
+                "total_tax": total_tax,
+                "total_cost": total_cost_with_tax,
                 "landed_qty": landed_qty,
                 "landed_carton": landed_carton,
+                "tax_per_piece": tax_per_piece,
             })
-            grand_total_etb += total_cost
-            
-        # --- Compute dead freight (must be done after product loop) ---
+            grand_total_etb += total_cost_with_tax
+
+        # --- Compute dead freight ---
         total_cost_sum = sum(c["amount"] for c in costs)
         total_allocated_sum = sum(pa["total_alloc"] for pa in product_allocations)
         if self.allocation_mode == "fixed" and allocation_denominator > total_cbm_sum:
@@ -157,7 +166,6 @@ class CalculationsMixin:
         else:
             self.dead_freight = 0.0
 
-        # Update dead freight label
         if hasattr(self, 'dead_freight_label'):
             if self.dead_freight > 0:
                 self.dead_freight_label.setText(
@@ -225,7 +233,7 @@ class CalculationsMixin:
         self.alloc_table.verticalHeader().setDefaultSectionSize(40)
         self.alloc_table.setAlternatingRowColors(True)
 
-        # --- Step 7: Update landed table (Tab 3) with new Qty/Carton column ---
+        # --- Step 7: Update landed table (Tab 4) with correct column order ---
         self.landed_table.setRowCount(len(landed_results))
         for i, res in enumerate(landed_results):
             self.landed_table.setItem(i, 0, QTableWidgetItem(res["name"]))
@@ -234,26 +242,20 @@ class CalculationsMixin:
             self.landed_table.setItem(i, 3, QTableWidgetItem(str(res["total_quantity"])))
             self.landed_table.setItem(i, 4, QTableWidgetItem(f"{res['fob_etb']:,.2f}"))
             self.landed_table.setItem(i, 5, QTableWidgetItem(f"{res['allocated']:,.2f}"))
-            self.landed_table.setItem(i, 6, QTableWidgetItem(f"{res['total_cost']:,.2f}"))
-            # Col 7: Landed Unit (set by update_landed_table)
-            # Col 8: Selling Price (set by calculate_selling_prices)
-            if not self.landed_table.item(i, 9):
-                self.landed_table.setItem(i, 9, QTableWidgetItem("0.00"))
-            # Col 10: Implied Margin (set by calculate_implied_margins)
+            # Column 6: Total Tax
+            self.landed_table.setItem(i, 6, QTableWidgetItem(f"{res['total_tax']:,.2f}"))
+            # Column 7: Total Cost
+            self.landed_table.setItem(i, 7, QTableWidgetItem(f"{res['total_cost']:,.2f}"))
 
-        # Update header of landed unit column (col 7)
-        basis_label = "Landed Unit (per Qty)" if self.current_basis == "qty" else "Landed Unit (per Carton)"
-        self.landed_table.setHorizontalHeaderItem(7, QTableWidgetItem(basis_label))
+        # Update landed unit column (col 8) via helper
+        self.update_landed_table()
 
         # Grand total
         self.grand_total_label.setText(f"Grand Total Landed Cost (ETB): {grand_total_etb:,.2f}")
 
-        # Populate the landed unit column
-        self.update_landed_table()
-
         # --- Step 8: Calculate pricing columns ---
-        self.calculate_selling_prices()
-        self.calculate_implied_margins()
+        self.calculate_selling_prices()      # sets column 9
+        self.calculate_implied_margins()      # reads col 10, sets col 11
 
         self.update_profit_summary()
         self.apply_landed_table_styling()
@@ -263,8 +265,9 @@ class CalculationsMixin:
         if not self.landed_results:
             return
 
-        # Columns to highlight: Total Cost (6), Landed Unit (7), Selling Price (8), Market Price (9), Implied Margin (10)
-        important_cols = [6, 7, 8, 9, 10]
+        # Columns to highlight: Total Tax (6), Total Cost (7), Landed Unit (8),
+        # Selling Price (9), Market Price (10), Implied Margin (11)
+        important_cols = [6, 7, 8, 9, 10, 11]
 
         for row in range(self.landed_table.rowCount()):
             for col in important_cols:
@@ -278,23 +281,24 @@ class CalculationsMixin:
                 item.setFont(font)
 
                 # Background colours
-                if col == 6:          # Total Cost
+                if col == 6:          # Total Tax
+                    item.setBackground(QColor(200, 240, 255))   # light cyan
+                elif col == 7:        # Total Cost
                     item.setBackground(QColor(240, 240, 240))   # light grey
-                elif col == 7:        # Landed Unit
+                elif col == 8:        # Landed Unit
                     item.setBackground(QColor(255, 255, 200))   # light yellow
-                elif col == 8:        # Selling Price
+                elif col == 9:        # Selling Price
                     item.setBackground(QColor(200, 230, 255))   # light blue
-                elif col == 9:        # Market Price
+                elif col == 10:       # Market Price
                     item.setBackground(QColor(230, 230, 255))   # light purple
-                elif col == 10:       # Implied Margin
+                elif col == 11:       # Implied Margin
                     try:
-                        # Remove '%' and commas, then convert to float
                         val_str = item.text().replace('%', '').replace(',', '').strip()
                         val = float(val_str) if val_str else 0.0
                     except ValueError:
                         val = 0.0
                     if val < 0:
-                        item.setBackground(QColor(255, 200, 200))   # redish
+                        item.setBackground(QColor(255, 200, 200))   # reddish
                     elif val > 0:
                         item.setBackground(QColor(200, 255, 200))   # greenish
                     else:

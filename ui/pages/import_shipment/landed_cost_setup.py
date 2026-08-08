@@ -1,3 +1,7 @@
+"""
+Landed Cost & Margin Tab for Import Shipments
+Tab 4 - Final tab with landed cost, pricing, and profit analysis
+"""
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QDoubleSpinBox, QTableWidget, QButtonGroup,
@@ -7,13 +11,16 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QColor
 
-class Tab3SetupMixin:
-    def setup_tab3(self):
-        """Build Tab 3: Landed Cost & Margin with integrated pricing columns."""
-        self.tab3 = QWidget()
-        layout = QVBoxLayout(self.tab3)
 
-        # --- Basis & Margin Controls (unchanged) ---
+class LandedCostSetupMixin:
+    """Contains setup_landed_tab and landed cost table methods."""
+
+    def setup_landed_tab(self):
+        """Build Tab 4: Landed Cost & Margin."""
+        self.landed_tab = QWidget()
+        layout = QVBoxLayout(self.landed_tab)
+
+        # --- Basis & Margin Controls ---
         controls_group = QGroupBox("Landed Unit Basis & Pricing")
         controls_layout = QHBoxLayout(controls_group)
 
@@ -52,17 +59,17 @@ class Tab3SetupMixin:
 
         layout.addWidget(controls_group)
 
-        # --- Landed Table (with new Qty/Carton column) ---
+        # --- Landed Table ---
         landed_group = QGroupBox("Landed Cost & Margin per Product")
         landed_layout = QVBoxLayout(landed_group)
 
         self.landed_table = QTableWidget()
-        self.landed_table.setColumnCount(11)  # <-- UPDATED
+        self.landed_table.setColumnCount(12)
         self.landed_table.setHorizontalHeaderLabels([
             "Product", "Cartons", "Qty/Carton", "Total Qty",
-            "FOB (ETB)", "Allocation (ETB)", "Total Cost (ETB)",
-            "Landed Unit (ETB)", "Selling Price (ETB)",
-            "Market Price (ETB)", "Implied Margin (%)"
+            "FOB (ETB)", "Allocation (ETB)", "Total Tax (ETB)",
+            "Total Cost (ETB)", "Landed Unit (ETB)",
+            "Selling Price (ETB)", "Market Price (ETB)", "Implied Margin (%)"
         ])
         self.landed_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.landed_table.setAlternatingRowColors(True)
@@ -75,14 +82,14 @@ class Tab3SetupMixin:
 
         landed_layout.addWidget(self.landed_table)
 
-        # --- Grand Total (unchanged) ---
+        # --- Grand Total ---
         self.grand_total_label = QLabel("Grand Total Landed Cost (ETB): 0.00")
         self.grand_total_label.setStyleSheet("font-size: 16pt; font-weight: bold; color: #1a6b3c;")
         landed_layout.addWidget(self.grand_total_label)
 
         layout.addWidget(landed_group)
 
-        # --- Profit Analysis (unchanged) ---
+        # --- Profit Analysis ---
         profit_group = QGroupBox("Profit Analysis")
         profit_layout = QVBoxLayout(profit_group)
 
@@ -121,13 +128,14 @@ class Tab3SetupMixin:
 
         layout.addWidget(profit_group)
 
-        self.tabs.addTab(self.tab3, "📊 Landed Cost & Margin")
+        self.tabs.addTab(self.landed_tab, "📊 Landed Cost & Margin")
 
     # ------------------------------------------------------------------
     # Basis & Margin Methods
     # ------------------------------------------------------------------
+
     def on_basis_changed(self):
-        """Handle basis toggle (Per Quantity / Per Carton)."""
+        """Handle basis toggle."""
         if self.per_qty_radio.isChecked():
             self.current_basis = "qty"
         else:
@@ -145,11 +153,12 @@ class Tab3SetupMixin:
 
         for i, res in enumerate(self.landed_results):
             landed_unit = res['landed_qty'] if self.current_basis == "qty" else res['landed_carton']
-            self.landed_table.setItem(i, 7, QTableWidgetItem(f"{landed_unit:,.2f}"))  # <-- 6 -> 7
+            # Column 8: Landed Unit
+            self.landed_table.setItem(i, 8, QTableWidgetItem(f"{landed_unit:,.2f}"))
 
-        # Update header of landed unit column
+        # Update header of landed unit column (column 8)
         basis_label = "Landed Unit (per Qty)" if self.current_basis == "qty" else "Landed Unit (per Carton)"
-        self.landed_table.setHorizontalHeaderItem(7, QTableWidgetItem(basis_label))   # <-- 6 -> 7
+        self.landed_table.setHorizontalHeaderItem(8, QTableWidgetItem(basis_label))
 
         self.calculate_selling_prices()
         self.calculate_implied_margins()
@@ -165,20 +174,21 @@ class Tab3SetupMixin:
         for i, res in enumerate(self.landed_results):
             landed_unit = res['landed_qty'] if self.current_basis == "qty" else res['landed_carton']
             selling_price = landed_unit * (1 + target_margin)
-            self.landed_table.setItem(i, 8, QTableWidgetItem(f"{selling_price:,.2f}"))  # <-- 7 -> 8
+            # Column 9: Selling Price
+            self.landed_table.setItem(i, 9, QTableWidgetItem(f"{selling_price:,.2f}"))
 
         self.update_profit_summary()
 
     def calculate_implied_margins(self):
-        """Calculate implied margins for all products based on per-product market price."""
+        """Calculate implied margins based on market price."""
         if not self.landed_results:
             return
 
         for i, res in enumerate(self.landed_results):
             landed_unit = res['landed_qty'] if self.current_basis == "qty" else res['landed_carton']
 
-            # Get market price from column 9 (was 8)
-            market_item = self.landed_table.item(i, 9)
+            # Column 10: Market Price
+            market_item = self.landed_table.item(i, 10)
             try:
                 market_price = float(market_item.text().replace(',', '')) if market_item else 0.0
             except ValueError:
@@ -189,30 +199,19 @@ class Tab3SetupMixin:
             else:
                 margin_pct = ((market_price - landed_unit) / landed_unit) * 100
 
-            self.landed_table.setItem(i, 10, QTableWidgetItem(f"{margin_pct:,.2f} %"))  # <-- 9 -> 10
+            # Column 11: Implied Margin
+            self.landed_table.setItem(i, 11, QTableWidgetItem(f"{margin_pct:,.2f} %"))
 
         self.update_profit_summary()
 
     def on_market_price_changed(self, row, col):
-        """When Market Price (col 8) is edited, recalculate Implied Margin (col 9)."""
-        if col == 9:
+        """When Market Price is edited, recalculate Implied Margin."""
+        if col == 10:  # Market Price column
             self.calculate_implied_margins()
             self.apply_landed_table_styling()
 
-    def set_market_price_for_all(self, price):
-        """Set the same market price for all products (helper method)."""
-        if not self.landed_results:
-            return
-
-        for i in range(len(self.landed_results)):
-            self.landed_table.setItem(i, 9, QTableWidgetItem(f"{price:,.2f}"))  # <-- 8 -> 9
-        self.calculate_implied_margins()
-
     def update_profit_summary(self):
-        """
-        Update the profit analysis summary based on current landed results,
-        selling prices, and market prices.
-        """
+        """Update the profit analysis summary."""
         if not self.landed_results:
             self.profit_total_cost_label.setText("Total Landed Cost: ETB 0.00")
             self.profit_total_selling_label.setText("Total Selling (Target Margin): ETB 0.00")
@@ -235,16 +234,16 @@ class Tab3SetupMixin:
             cost = res["total_cost"]
             total_cost += cost
 
-            # Selling price – column 8 (was 7)
-            sp_item = self.landed_table.item(i, 8)
+            # Column 9: Selling Price
+            sp_item = self.landed_table.item(i, 9)
             try:
                 sp = float(sp_item.text().replace(',', '')) if sp_item else 0.0
             except ValueError:
                 sp = 0.0
             total_selling += sp * qty
 
-            # Market price – column 9 (was 8)
-            mp_item = self.landed_table.item(i, 9)
+            # Column 10: Market Price
+            mp_item = self.landed_table.item(i, 10)
             try:
                 mp = float(mp_item.text().replace(',', '')) if mp_item else 0.0
             except ValueError:
@@ -269,3 +268,45 @@ class Tab3SetupMixin:
 
         diff = profit_market - profit_target
         self.profit_diff_label.setText(f"Market vs Target Difference: ETB {diff:,.2f}")
+
+    def apply_landed_table_styling(self):
+        """Apply visual styling to important columns."""
+        if not self.landed_results:
+            return
+
+        important_cols = [6, 7, 8, 9, 10, 11]
+
+        for row in range(self.landed_table.rowCount()):
+            for col in important_cols:
+                item = self.landed_table.item(row, col)
+                if not item:
+                    continue
+
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+
+                if col == 6:          # Total Tax
+                    item.setBackground(QColor(200, 240, 255))
+                elif col == 7:        # Total Cost
+                    item.setBackground(QColor(255, 240, 230))
+                elif col == 8:        # Landed Unit
+                    item.setBackground(QColor(255, 255, 200))
+                elif col == 9:        # Selling Price
+                    item.setBackground(QColor(200, 230, 255))
+                elif col == 10:       # Market Price
+                    item.setBackground(QColor(230, 230, 255))
+                elif col == 11:       # Implied Margin
+                    try:
+                        val_str = item.text().replace('%', '').replace(',', '').strip()
+                        val = float(val_str) if val_str else 0.0
+                    except ValueError:
+                        val = 0.0
+                    if val < 0:
+                        item.setBackground(QColor(255, 200, 200))
+                    elif val > 0:
+                        item.setBackground(QColor(200, 255, 200))
+                    else:
+                        item.setBackground(QColor(240, 240, 240))
+
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)

@@ -28,10 +28,6 @@ class ImportShipmentService(BaseService):
     # Helper: create bank transaction for a cost item (existing)
     # ------------------------------------------------------------------
     def _create_bank_transaction_for_cost(self, session, shipment_id, cost_data):
-        """
-        Create a BankTransaction (debit) for a paid cost.
-        Returns the transaction ID or None.
-        """
         bank_account_id = cost_data.get('bank_account_id')
         payment_date = cost_data.get('payment_date')
         if not bank_account_id or not payment_date:
@@ -67,10 +63,6 @@ class ImportShipmentService(BaseService):
     # NEW: Helper to create bank transaction for FOB total
     # ------------------------------------------------------------------
     def _create_fob_transaction(self, session, shipment_id, bank_account_id, amount_etb, payment_date):
-        """
-        Create a DEBIT transaction for the total FOB amount.
-        Returns the transaction ID or raises ValueError.
-        """
         if amount_etb <= 0:
             return None
 
@@ -119,7 +111,12 @@ class ImportShipmentService(BaseService):
                 allocation_mode=data.get('allocation_mode', 'used_cbm'),
                 status=ShipmentStatusEnum.DRAFT,
                 created_by_user_id=data['created_by_user_id'],
-                payment_status=payment_status
+                payment_status=payment_status,
+                tax_usd_rate=data.get('tax_usd_rate'),
+                tax_total_usd=data.get('tax_total_usd'),
+                tax_sample_frt=data.get('tax_sample_frt'),
+                tax_rater=data.get('tax_rater'),
+                tax_freight_ratio=data.get('tax_freight_ratio')
             )
             session.add(shipment)
             session.flush()   # ensure shipment gets an ID
@@ -144,6 +141,15 @@ class ImportShipmentService(BaseService):
                     market_price=prod.get('market_price', 0.0),
                     landed_cost_per_unit=prod.get('landed_cost_per_unit', 0.0),   # <-- NEW
                     target_selling_price=prod.get('target_selling_price', 0.0),   # <-- NEW
+                    usd_per_dozen=prod.get('usd_per_dozen', 0.0),
+                    total_usd=prod.get('total_usd', 0.0),
+                    total_price_etb=prod.get('total_price_etb', 0.0),
+                    tax_frt_ctn=prod.get('tax_frt_ctn', 0.0),
+                    tax_dpv_ctn=prod.get('tax_dpv_ctn', 0.0),
+                    total_tax_etb=prod.get('total_tax_etb', 0.0),
+                    tax_per_dozen=prod.get('tax_per_dozen', 0.0),
+                    tax_per_unit=prod.get('tax_per_unit', 0.0),
+                    tax_qty_per_doz=prod.get('tax_qty_per_doz', 0.0)
                 )
                 session.add(product)
 
@@ -217,6 +223,11 @@ class ImportShipmentService(BaseService):
             shipment.exchange_rate = float(data['exchange_rate'])
             shipment.target_margin = data.get('target_margin', 20.0)
             shipment.allocation_mode = data.get('allocation_mode', 'used_cbm')
+            shipment.tax_usd_rate = data.get('tax_usd_rate')
+            shipment.tax_total_usd = data.get('tax_total_usd')
+            shipment.tax_sample_frt = data.get('tax_sample_frt')
+            shipment.tax_rater = data.get('tax_rater')
+            shipment.tax_freight_ratio = data.get('tax_freight_ratio')
 
             # Update payment status
             new_payment_status = data.get('payment_status', PaymentStatusEnum.CREDIT.value)
@@ -273,6 +284,15 @@ class ImportShipmentService(BaseService):
                     market_price=prod.get('market_price', 0.0),
                     landed_cost_per_unit=prod.get('landed_cost_per_unit', 0.0),
                     target_selling_price=prod.get('target_selling_price', 0.0),
+                    usd_per_dozen=prod.get('usd_per_dozen', 0.0),
+                    total_usd=prod.get('total_usd', 0.0),
+                    total_price_etb=prod.get('total_price_etb', 0.0),
+                    tax_frt_ctn=prod.get('tax_frt_ctn', 0.0),
+                    tax_dpv_ctn=prod.get('tax_dpv_ctn', 0.0),
+                    total_tax_etb=prod.get('total_tax_etb', 0.0),
+                    tax_per_dozen=prod.get('tax_per_dozen', 0.0),
+                    tax_per_unit=prod.get('tax_per_unit', 0.0),
+                    tax_qty_per_doz=prod.get('tax_qty_per_doz', 0.0)
                 )
                 session.add(product)
 

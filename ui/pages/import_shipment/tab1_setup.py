@@ -354,6 +354,8 @@ class Tab1SetupMixin:
         self.update_total_display()
         if trigger_calculation:
             self.calculate_landed()
+        if hasattr(self, 'populate_tax_table'):
+            self.populate_tax_table()
 
     def remove_selected_product(self):
         """Remove the currently selected product row from the table."""
@@ -367,6 +369,8 @@ class Tab1SetupMixin:
         self.update_table_summary()
         self.update_total_display()
         self.calculate_landed()
+        if hasattr(self, 'populate_tax_table'):
+            self.populate_tax_table()
 
     def on_table_item_changed(self, item):
         """
@@ -503,6 +507,8 @@ class Tab1SetupMixin:
         # Update totals and summary
         self.update_total_display()
         self.update_table_summary()
+        if hasattr(self, 'populate_tax_table'):
+            self.populate_tax_table()
             
         QMessageBox.information(self, "Cleared", "All products have been removed.")
 

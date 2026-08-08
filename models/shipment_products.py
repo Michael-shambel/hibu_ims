@@ -25,6 +25,16 @@ class ShipmentProduct(BaseModel):
     target_selling_price = Column(Float, nullable=True)    # from target margin
     market_price = Column(Float, nullable=True, default=0.0)
 
+    usd_per_dozen = Column(Float, nullable=True)
+    total_usd = Column(Float, nullable=True)
+    total_price_etb = Column(Float, nullable=True)
+    tax_frt_ctn = Column(Float, nullable=True)
+    tax_dpv_ctn = Column(Float, nullable=True)
+    total_tax_etb = Column(Float, nullable=True)
+    tax_per_dozen = Column(Float, nullable=True)
+    tax_per_unit = Column(Float, nullable=True)
+    tax_qty_per_doz = Column(Float, nullable=True)
+
     shipment = relationship("ImportShipment", back_populates="products")
     product = relationship("ProfessionalProduct", foreign_keys=[product_id])
 

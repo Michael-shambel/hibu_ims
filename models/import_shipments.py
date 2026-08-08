@@ -28,6 +28,11 @@ class ImportShipment(BaseModel):
     payment_status = Column(String(20), nullable=False, default=PaymentStatusEnum.CREDIT.value)
     stocked_in = Column(Boolean, default=False, nullable=False)
     purchase_id = Column(Integer, ForeignKey('purchases.id'), nullable=True)
+    tax_usd_rate = Column(Float, nullable=True)
+    tax_total_usd = Column(Float, nullable=True)
+    tax_sample_frt = Column(Float, nullable=True)
+    tax_rater = Column(Float, nullable=True)
+    tax_freight_ratio = Column(Float, nullable=True)
 
 
     supplier = relationship("Supplier", foreign_keys=[supplier_id])
