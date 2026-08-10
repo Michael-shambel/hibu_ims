@@ -51,7 +51,7 @@ class DatabaseManager:
             engine = create_engine(
                 db_url,
                 echo=False,
-                connect_args={"check_same_thread": False} if "sqlite" in db_url else {},
+                connect_args={"check_same_thread": False, "timeout": 30} if "sqlite" in db_url else {},
             )
             logger.info("Database engine initialized")
             return engine

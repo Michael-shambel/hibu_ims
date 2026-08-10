@@ -11,7 +11,6 @@ from services.bank_transaction_service import BankTransactionService
 from services.base_service import BaseService, get_session
 from sqlalchemy import func
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +41,45 @@ class CashLoanService(BaseService[CashLoan]):
             return f"name-phone:{normalized_name}:{normalized_phone}"
         return f"name-only:{normalized_name}"
 
+    def _find_existing_open_loan(
+        self,
+        session,
+        customer_id: Optional[int],
+        supplier_id: Optional[int],
+        person_name: str,
+        phone: str,
+        direction: CashLoanDirectionEnum,
+    ) -> Optional[CashLoan]:
+        """
+        Find an open loan for the same person and direction.
+        Priority: customer_id > supplier_id > name+phone match.
+        Only returns loans that are not fully paid.
+        """
+        query = session.query(CashLoan).filter(
+            CashLoan.is_deleted == False,
+            CashLoan.status != "paid",          # only open (outstanding or partial)
+            CashLoan.direction == direction,
+        )
+
+        if customer_id:
+            query = query.filter(CashLoan.customer_id == customer_id)
+        elif supplier_id:
+            query = query.filter(CashLoan.supplier_id == supplier_id)
+        else:
+            # Manual person: match by normalized name and phone (if provided)
+            norm_name = self.normalize_name(person_name)
+            norm_phone = self.normalize_phone(phone)
+            if not norm_name:
+                return None
+            # Use ILIKE for case-insensitive partial matching; for exact name, we could do equality
+            # but ILIKE is safer for minor variations.
+            query = query.filter(CashLoan.person_name.ilike(f"%{norm_name}%"))
+            if norm_phone:
+                query = query.filter(CashLoan.phone.ilike(f"%{norm_phone}%"))
+            # else: no phone filter, rely on name only
+
+        return query.order_by(CashLoan.id.asc()).first()  # pick the oldest open loan
+
     def create_cash_loan(
         self,
         person_name: str,
@@ -56,6 +94,10 @@ class CashLoanService(BaseService[CashLoan]):
         customer_id: Optional[int] = None,
         supplier_id: Optional[int] = None,
     ) -> Tuple[bool, str]:
+        """
+        Create a new cash loan or add amount to an existing open loan.
+        Returns (success, message).
+        """
         if loan_date is None:
             loan_date = date.today()
         direction = CashLoanDirectionEnum(direction)
@@ -74,6 +116,65 @@ class CashLoanService(BaseService[CashLoan]):
 
         with get_session() as session:
             try:
+                # ---- Check for existing open loan ----
+                existing = self._find_existing_open_loan(
+                    session, customer_id, supplier_id, person_name, phone, direction
+                )
+
+                dt = datetime.combine(loan_date, datetime.now().time())
+
+                if existing:
+                    # ---- Add to existing loan ----
+                    # Validate direction consistency (should match)
+                    if existing.direction != direction:
+                        return False, "Direction mismatch with existing loan."
+
+                    # Check sufficient balance if giving money
+                    if direction == CashLoanDirectionEnum.GIVEN:
+                        current_balance = self.bank_transaction_service.get_balance(bank_account_id)
+                        if current_balance < amount:
+                            return False, (
+                                f"Insufficient funds. Available: ${current_balance:,.2f}, "
+                                f"Required: ${amount:,.2f}"
+                            )
+
+                    # Create bank transaction for the additional amount
+                    bank_direction = (
+                        TransactionDirectionEnum.DEBIT
+                        if direction == CashLoanDirectionEnum.GIVEN
+                        else TransactionDirectionEnum.CREDIT
+                    )
+                    description = (
+                        f"Additional cash loan to {person_name} (added to loan #{existing.id})"
+                        if direction == CashLoanDirectionEnum.GIVEN
+                        else f"Additional cash loan from {person_name} (added to loan #{existing.id})"
+                    )
+                    if notes:
+                        description = f"{description} - {notes}"
+
+                    bank_tx = self.bank_transaction_service.create_transaction(session, {
+                        "bank_account_id": bank_account_id,
+                        "transaction_date": loan_date,
+                        "direction": bank_direction,
+                        "amount": amount,
+                        "payment_method": PaymentMethodEnum.TRANSFER,
+                        "description": description,
+                        "recorded_by_user_id": user_id,
+                        "created_at": dt,
+                        "last_modified": dt,
+                    })
+                    if not bank_tx:
+                        raise Exception("Failed to create bank transaction for additional amount.")
+
+                    # Update loan principal
+                    existing.principal_amount += amount
+                    existing.last_modified = dt
+                    existing.update_status()  # may set to PAID if fully paid (won't, because we only add)
+                    session.commit()
+
+                    return True, f"Amount added to existing loan #{existing.id} for {person_name}."
+
+                # ---- Create new loan (original logic) ----
                 if direction == CashLoanDirectionEnum.GIVEN:
                     current_balance = self.bank_transaction_service.get_balance(bank_account_id)
                     if current_balance < amount:
@@ -82,7 +183,6 @@ class CashLoanService(BaseService[CashLoan]):
                             f"Required: ${amount:,.2f}"
                         )
 
-                dt = datetime.combine(loan_date, datetime.now().time())
                 bank_direction = (
                     TransactionDirectionEnum.DEBIT
                     if direction == CashLoanDirectionEnum.GIVEN
@@ -130,7 +230,8 @@ class CashLoanService(BaseService[CashLoan]):
                 loan.update_status()
                 session.add(loan)
                 session.commit()
-                return True, ""
+                return True, f"New loan #{loan.id} created for {person_name}."
+
             except Exception as exc:
                 session.rollback()
                 logger.error(f"Error creating cash loan: {exc}", exc_info=True)
@@ -350,16 +451,9 @@ class CashLoanService(BaseService[CashLoan]):
                 session.rollback()
                 logger.error(f"Error cancelling loan {loan_id}: {exc}", exc_info=True)
                 return False, f"An error occurred: {exc}"
-    
+
     def delete_payment(self, payment_id: int, user_id: int):
         """Delete a loan payment and recalculate the loan balance."""
-        from models.cash_loan import CashLoan, CashLoanPayment
-        from models.bank_transactions import BankTransaction
-        from services.base_service import get_session
-        from sqlalchemy import func
-        import logging
-        logger = logging.getLogger(__name__)
-
         try:
             with get_session() as session:
                 payment = session.query(CashLoanPayment).filter_by(

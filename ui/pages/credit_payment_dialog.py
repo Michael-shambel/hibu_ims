@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox,
-    QLineEdit, QMessageBox, QApplication, QScrollArea, QWidget
+    QLineEdit, QMessageBox, QApplication, QScrollArea, QWidget, QCheckBox
 )
 from PySide6.QtCore import Qt, QDate, QLocale, QTimer
 from PySide6.QtGui import QDoubleValidator, QFont
@@ -268,8 +268,28 @@ class CreditPaymentDialog(QDialog):
             QPushButton:hover { background-color: #d5d5d5; }
         """)
         cancel_btn.clicked.connect(self.reject)
+        self.send_notifications_checkbox = QCheckBox("Send Notifications")
+        self.send_notifications_checkbox.setChecked(True)
+        self.send_notifications_checkbox.setToolTip("Uncheck to prevent sending order notification to supplier and store team")
+        self.send_notifications_checkbox.setStyleSheet("""
+            QCheckBox {
+                padding: 4px 8px;
+                border-radius: 4px;
+                background-color: #ecf0f1;
+                color: #2c3e50;
+            }
+            QCheckBox:checked {
+                background-color: #27ae60;
+                color: white;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+            }
+        """)
 
         btn_layout.addStretch()
+        btn_layout.addWidget(self.send_notifications_checkbox)
         btn_layout.addWidget(save_btn)
         btn_layout.addWidget(cancel_btn)
         main_layout.addLayout(btn_layout)
@@ -442,9 +462,11 @@ class CreditPaymentDialog(QDialog):
 
         if success:
             if self.transaction_type == 'sale':
-                notify_customer_sync(self.customer_id)
+                if self.send_notifications_checkbox.isChecked():
+                    notify_customer_sync(self.customer_id)
             else:
-                notify_supplier_purchase_sync(self.customer_id)
+                if self.send_notifications_checkbox.isChecked():
+                    notify_supplier_purchase_sync(self.customer_id)
             self.accept()
         else:
             QMessageBox.critical(self, "Payment Failed", error_msg or "Failed to record payment.")

@@ -616,6 +616,15 @@ class ProductManager(QWidget):
         # Delete button
         delete_btn = QPushButton("🗑️")
         delete_btn.setFixedSize(45, 45)
+        delete_btn.setEnabled(False)
+        delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f8f9fa;
+                color: #bdc3c7;
+                border: 1px solid #ecf0f1;
+                border-radius: 4px;
+                }
+        """)
         delete_btn.setFont(QFont("Segoe UI", 20))
         delete_btn.setToolTip("Delete Product (Admin only)")
         if not self.is_user_admin():

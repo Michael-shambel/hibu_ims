@@ -4,6 +4,7 @@ SupplierService
 """
 from services.base_service import BaseService, get_session
 from models.supplier import Supplier
+from models.customers import Customer
 from typing import Optional, List
 import logging
 import json
@@ -202,8 +203,47 @@ class SupplierService(BaseService[Supplier]):
             return None
 
     def create(self, data: dict) -> Optional[Supplier]:
+        # Normalize additional_chat_ids (existing logic)
         self._normalize_additional_chat_ids(data)
-        return super().create(data)
+
+        with get_session() as session:
+            try:
+                # 1. Create the supplier
+                supplier = Supplier(**data)
+                session.add(supplier)
+                session.flush()
+
+                # 2. Map to customer
+                phone = supplier.contact_phone
+                if phone:
+                    # Check if a customer with this phone already exists
+                    existing_customer = session.query(Customer).filter(
+                        Customer.phone == phone,
+                        Customer.is_deleted == False
+                    ).first()
+
+                    if existing_customer:
+                        # Update customer name (in case supplier name changed)
+                        existing_customer.name = supplier.supplier_name
+                        logger.info(f"Updated existing customer (ID {existing_customer.id}) with supplier name")
+                    else:
+                        # Create a new customer
+                        new_customer = Customer(
+                            name=supplier.supplier_name,
+                            phone=phone
+                        )
+                        session.add(new_customer)
+                        logger.info(f"Created new customer for supplier {supplier.supplier_name}")
+
+                # 3. Commit both in one transaction
+                session.commit()
+                session.refresh(supplier)
+                return supplier
+
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error creating supplier and customer: {e}")
+                return None
 
     def update(self, id: int, data: dict) -> Optional[Supplier]:
         self._normalize_additional_chat_ids(data)

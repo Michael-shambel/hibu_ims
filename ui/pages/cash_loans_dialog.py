@@ -27,7 +27,7 @@ from ui.pages.expense_dialog import (
     ModernComboBox, ModernInput, ModernEthiopianDateEdit, NumberLineEdit
 )
 from ui.pages.sales_page import AddCustomerDialog, SelectAllLineEdit
-from PySide6.QtCore import QDate, Qt, QStringListModel
+from PySide6.QtCore import QDate, Qt, QStringListModel, QTimer
 from PySide6.QtGui import QColor, QFont, QDoubleValidator
 
 
@@ -36,6 +36,7 @@ from services.bank_account_service import BankAccountService
 from services.cash_loan_service import CashLoanService
 from services.customer_service import CustomerService
 from services.supplier_service import SupplierService
+from ui.components.ethiopian_date import EthiopianDateConverter
 
 
 class CashLoansOverviewDialog(QDialog):
@@ -812,6 +813,53 @@ class CashLoanEntryDialog(QDialog):
             label += f" ({account.account_number})"
         return label
 
+    # ---------- Core logic with defaults ----------
+    def load_lists(self):
+        self.customers = CustomerService().get_all()
+        self.suppliers = SupplierService().get_all()
+        self.accounts = BankAccountService().get_all()
+        self.populate_bank_combo()
+
+        # Set default Person Source to "Existing customer"
+        idx = self.source_combo.findData("customer")
+        if idx >= 0:
+            self.source_combo.setCurrentIndex(idx)          # this triggers on_source_changed
+        else:
+            # fallback: by text
+            for i in range(self.source_combo.count()):
+                if self.source_combo.itemText(i).lower() == "existing customer":
+                    self.source_combo.setCurrentIndex(i)
+                    break
+
+        # Apply other defaults (customer selection, amount, bank)
+        # Use singleShot to let UI settle after the combo population
+        QTimer.singleShot(0, self.apply_defaults)
+
+    # ---------- NEW: Apply default selections ----------
+    def apply_defaults(self):
+        """
+        Apply defaults after lists are loaded and source is set.
+        """
+        # 2. Select person "ekub" (case-insensitive partial match)
+        for i in range(self.entity_combo.count()):
+            text = self.entity_combo.itemText(i).lower()
+            if "ekub" in text:
+                self.entity_combo.setCurrentIndex(i)
+                break
+
+        # 3. Set amount to 21200
+        self.amount_spin.setText("21200")
+
+        # 4. Set bank/cash account to "CASH - SHOPE(00000)"
+        # Find account with account_number "00000" and bank_name "CASH"
+        for i in range(self.bank_combo.count()):
+            account_id = self.bank_combo.itemData(i)
+            if account_id:
+                account = next((a for a in self.accounts if a.id == account_id), None)
+                if account and account.account_number == "00000" and account.bank_name and account.bank_name.lower() == "cash":
+                    self.bank_combo.setCurrentIndex(i)
+                    break
+
 
 # ===================================================================
 # CashLoanRepaymentDialog (unchanged from original)
@@ -823,57 +871,212 @@ class CashLoanRepaymentDialog(QDialog):
         self.loan = loan
         self.accounts = []
         self.setWindowTitle(f"Record Loan Repayment - {loan['person_name']}")
-        self.setMinimumWidth(560)
+        self.setMinimumSize(800, 600)
+        # self.setMinimumWidth(560)
         self.init_ui()
         self.load_accounts()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
-        header = QLabel(
-            f"<b>{self.loan['person_name']}</b><br>"
-            f"Remaining: <b>${self.loan['remaining']:,.2f}</b><br>"
-            f"{self.loan['direction_label']}"
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background-color: #f8f9fa; border: none; }")
+
+        container = QWidget()
+        container.setStyleSheet("background-color: #f8f9fa;")
+        form_layout = QVBoxLayout(container)
+        form_layout.setContentsMargins(30, 20, 30, 20)
+        form_layout.setSpacing(15)
+
+        # ---- Card ----
+        card = QFrame()
+        card.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 12px;
+                border: 1px solid #e0e0e0;
+            }
+        """)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        card_layout = QGridLayout(card)
+        card_layout.setContentsMargins(35, 25, 35, 25)
+        card_layout.setHorizontalSpacing(30)
+        card_layout.setVerticalSpacing(15)
+
+        # ---- Loan info header (spans both columns) ----
+        info_label = QLabel(
+            f"<b>Repaying for:</b> {self.loan['person_name']}<br>"
+            f"<b>Remaining:</b> ${self.loan['remaining']:,.2f}<br>"
+            f"<b>Direction:</b> {self.loan['direction_label']}"
         )
-        header.setStyleSheet("font-size: 14px; padding: 10px; background-color: #f8f9fa; border-radius: 6px;")
-        layout.addWidget(header)
+        info_label.setFont(QFont("Segoe UI", 13))
+        info_label.setStyleSheet("padding: 10px; background-color: #f0f4f8; border-radius: 6px;")
+        card_layout.addWidget(info_label, 0, 0, 1, 2)
 
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignRight)
-
+        # ---- Amount ----
+        amount_widget = QWidget()
+        amount_layout = QVBoxLayout(amount_widget)
+        amount_layout.setContentsMargins(0, 0, 0, 0)
+        amount_layout.setSpacing(1)
+        amount_label = QLabel("Amount")
+        amount_label.setFont(QFont("Segoe UI", 9))
+        amount_label.setStyleSheet("color: #6b7280; margin: 0px; padding: 0px;")
+        amount_layout.addWidget(amount_label)
         self.amount_spin = QDoubleSpinBox()
         self.amount_spin.setRange(0.01, max(0.01, self.loan["remaining"]))
         self.amount_spin.setDecimals(2)
         self.amount_spin.setSingleStep(100)
         self.amount_spin.setPrefix("$ ")
         self.amount_spin.setValue(self.loan["remaining"])
-        form.addRow("Amount:*", self.amount_spin)
+        self.amount_spin.setMinimumHeight(46)
+        self.amount_spin.setStyleSheet("""
+            QDoubleSpinBox {
+                border: 1px solid #d1d5db;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 14px;
+                background-color: white;
+            }
+            QDoubleSpinBox:focus {
+                border: 1px solid #3b82f6;
+            }
+        """)
+        amount_layout.addWidget(self.amount_spin)
+        card_layout.addWidget(amount_widget, 1, 0)
 
-        self.bank_combo = QComboBox()
-        form.addRow("Bank/Cash Account:*", self.bank_combo)
+        # ---- Bank Account ----
+        bank_container, self.bank_combo = self._labeled_combo("Bank/Cash Account")
+        card_layout.addWidget(bank_container, 1, 1)
 
-        self.date_edit = QDateEdit()
-        self.date_edit.setCalendarPopup(True)
-        self.date_edit.setDisplayFormat("yyyy-MM-dd")
+        # ---- Payment Date (Ethiopian) ----
+        self.date_edit = ModernEthiopianDateEdit("Payment Date")
         self.date_edit.setDate(QDate.currentDate())
-        form.addRow("Payment Date:*", self.date_edit)
+        card_layout.addWidget(self.date_edit, 2, 0)
 
-        self.note_edit = QLineEdit()
+        # ---- Note ----
+        note_container, self.note_edit = self._labeled_line_edit("Note (optional)")
         self.note_edit.setPlaceholderText("Optional note")
-        form.addRow("Note:", self.note_edit)
-        layout.addLayout(form)
+        card_layout.addWidget(note_container, 2, 1)
 
-        buttons = QHBoxLayout()
-        save_btn = QPushButton("Save")
-        save_btn.setFixedSize(110, 40)
-        save_btn.setStyleSheet(CashLoansOverviewDialog._button_style("#27ae60", "#219a52"))
-        save_btn.clicked.connect(self.validate_and_accept)
+        # ---- End of card ----
+        form_layout.addWidget(card)
+        form_layout.addStretch()
+        scroll.setWidget(container)
+        main_layout.addWidget(scroll, 1)
+
+        # ---- Button Bar ----
+        button_bar = QWidget()
+        button_bar.setFixedHeight(80)
+        button_bar.setStyleSheet("""
+            QWidget { background-color: white; border-top: 1px solid #e0e0e0; }
+        """)
+        btn_layout = QHBoxLayout(button_bar)
+        btn_layout.setContentsMargins(30, 15, 30, 15)
+        btn_layout.setSpacing(15)
+
         cancel_btn = QPushButton("Cancel")
-        cancel_btn.setFixedSize(100, 40)
+        cancel_btn.setMinimumSize(100, 40)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e0e0e0;
+                color: #2c3e50;
+                border: none;
+                border-radius: 6px;
+                font-weight: 600;
+                font-size: 13px;
+                padding: 10px 20px;
+            }
+            QPushButton:hover { background-color: #d5d5d5; }
+        """)
         cancel_btn.clicked.connect(self.reject)
-        buttons.addStretch()
-        buttons.addWidget(save_btn)
-        buttons.addWidget(cancel_btn)
-        layout.addLayout(buttons)
+
+        save_btn = QPushButton("Record Payment")
+        save_btn.setMinimumSize(150, 45)
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.setStyleSheet(CashLoansOverviewDialog._button_style("#8e44ad", "#7d3c98"))
+        save_btn.clicked.connect(self.validate_and_accept)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(save_btn)
+
+        main_layout.addWidget(button_bar)
+
+    # Helper methods (reuse from CashLoanEntryDialog)
+    def _labeled_line_edit(self, label_text: str):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        lbl = QLabel(label_text)
+        lbl.setFont(QFont("Segoe UI", 9))
+        lbl.setStyleSheet("color: #6b7280; margin: 0px; padding: 0px;")
+        layout.addWidget(lbl)
+
+        edit = QLineEdit()
+        edit.setMinimumHeight(40)
+        edit.setStyleSheet("""
+            QLineEdit {
+                border: 1px solid #d1d5db;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 14px;
+                background-color: white;
+            }
+            QLineEdit:focus {
+                border: 1px solid #3b82f6;
+            }
+        """)
+        layout.addWidget(edit)
+        return container, edit
+
+    def _labeled_combo(self, label_text: str):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        lbl = QLabel(label_text)
+        lbl.setFont(QFont("Segoe UI", 9))
+        lbl.setStyleSheet("color: #6b7280; margin: 0px; padding: 0px;")
+        layout.addWidget(lbl)
+
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.setMinimumHeight(46)
+        combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #d1d5db;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 14px;
+                background-color: white;
+            }
+            QComboBox:focus {
+                border: 1px solid #3b82f6;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 30px;
+            }
+            QComboBox QAbstractItemView {
+                border: 1px solid #d1d5db;
+                background-color: white;
+                selection-background-color: #e3f2fd;
+                font-size: 14px;
+                padding: 6px;
+            }
+        """)
+        layout.addWidget(combo)
+        return container, combo
 
     def load_accounts(self):
         self.accounts = BankAccountService().get_all()
@@ -931,13 +1134,13 @@ class LoanPaymentHistoryDialog(QDialog):
 
         self.table = QTableWidget()
         self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Date", "Amount", "Bank Account", "Note", "Actions"])
+        self.table.setHorizontalHeaderLabels(["Date (Ethiopian)", "Amount", "Bank Account", "Note", "Actions"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
-        self.table.setColumnWidth(4, 60)  # width for delete button
+        self.table.setColumnWidth(4, 60)
 
         self.table.setAlternatingRowColors(True)
         self.table.setFont(QFont("Segoe UI", 12))
@@ -972,8 +1175,15 @@ class LoanPaymentHistoryDialog(QDialog):
         is_admin = self.is_user_admin()
 
         for row, p in enumerate(payments):
-            # Date
-            date_item = QTableWidgetItem(p['payment_date'].strftime("%Y-%m-%d"))
+            # Convert Gregorian date to Ethiopian format
+            greg_date = p['payment_date']  # Python date
+            try:
+                eth_year, eth_month, eth_day = EthiopianDateConverter.to_ethiopian(greg_date)
+                eth_date_str = f"{eth_year:04d}-{eth_month:02d}-{eth_day:02d}"
+            except Exception:
+                eth_date_str = greg_date.strftime("%Y-%m-%d")  # fallback to Gregorian
+
+            date_item = QTableWidgetItem(eth_date_str)
             date_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 0, date_item)
 

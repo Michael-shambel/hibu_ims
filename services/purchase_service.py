@@ -422,13 +422,18 @@ class PurchaseService(BaseService[Purchase]):
                     supplier_totals[sid]['total_amount'] += debit
                     supplier_totals[sid]['total_amount'] -= credit
 
-            # Collect purchase IDs per supplier (for the "View" button)
-            purchases = session.query(Purchase).filter(
-                Purchase.is_deleted == False
-            ).all()
+            # Collect purchase IDs only for suppliers with ledger activity
             supplier_pids = defaultdict(list)
-            for p in purchases:
-                supplier_pids[p.supplier_id].append(p.id)
+            if supplier_totals:
+                pid_rows = session.query(
+                    Purchase.supplier_id,
+                    Purchase.id,
+                ).filter(
+                    Purchase.is_deleted == False,
+                    Purchase.supplier_id.in_(supplier_totals.keys()),
+                ).all()
+                for sid, pid in pid_rows:
+                    supplier_pids[sid].append(pid)
 
             # Get supplier names
             suppliers = session.query(Supplier).filter(
@@ -869,16 +874,19 @@ class PurchaseService(BaseService[Purchase]):
                 for bt in bank_txs:
                     affected_accounts.add(bt.bank_account_id)
 
+                # Soft-delete bank transactions
                 session.query(BankTransaction).filter(
                     BankTransaction.purchase_payment_term_id.in_(term_ids),
                     BankTransaction.is_deleted == False
                 ).update({"is_deleted": True}, synchronize_session=False)
 
+                # Soft-delete purchase payment transactions
                 session.query(PurchasePaymentTransaction).filter(
                     PurchasePaymentTransaction.purchase_payments_term_id.in_(term_ids),
                     PurchasePaymentTransaction.is_deleted == False
                 ).update({"is_deleted": True}, synchronize_session=False)
 
+                # Soft-delete payment terms
                 session.query(PurchasePaymentTerm).filter(
                     PurchasePaymentTerm.id.in_(term_ids),
                     PurchasePaymentTerm.is_deleted == False
@@ -890,11 +898,20 @@ class PurchaseService(BaseService[Purchase]):
                 ProductBatch.is_deleted == False
             ).update({"is_deleted": True}, synchronize_session=False)
 
+            # ==================================================
+            # 🔥 NEW: Soft‑delete ledger entries for this purchase
+            # ==================================================
+            session.query(SupplierCreditLedger).filter(
+                SupplierCreditLedger.purchase_id == purchase_id,
+                SupplierCreditLedger.is_deleted == False
+            ).update({"is_deleted": True}, synchronize_session=False)
+
+            # Soft‑delete the purchase itself
             purchase.is_deleted = True
 
             session.flush()
 
-            # Recalculate balances for all affected accounts
+            # Recalculate balances for all affected bank accounts
             for acc_id in affected_accounts:
                 BankTransactionService().recalculate_balances_for_account(session, acc_id)
 

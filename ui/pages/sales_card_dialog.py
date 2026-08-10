@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 import sys
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, QComboBox,
     QHeaderView, QPushButton, QWidget, QLabel, QMessageBox, QScrollArea, QTabWidget,
-    QFrame, QGridLayout, QSizePolicy, QGraphicsDropShadowEffect,QLineEdit, QApplication
+    QFrame, QGridLayout, QSizePolicy, QGraphicsDropShadowEffect,QLineEdit, QApplication, QDialogButtonBox, QDoubleSpinBox
 )
 from models.sale_payment_term import PaymentStatusEnum
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QFont, QCursor, QColor
 from functools import partial
 from datetime import date, timedelta, datetime
@@ -22,6 +22,7 @@ from telegrambot.bot import notify_store_team_sync, is_bot_ready
 from ui.pages.expense_overview_dialog import ExpenseOverviewDialog
 from fidel import Transliterate
 import re
+import difflib
 from typing import Tuple, Optional
 import logging
 
@@ -834,21 +835,39 @@ class SalesDetailDialog(QDialog):
             self.table.removeRow(r)
 
     # ---------- Search ----------
+    @staticmethod
+    def _fuzzy_token_match(query_token, row_tokens, threshold=0.6):
+        """Return True if query_token matches any row_token exactly,
+        as a substring, or closely enough to tolerate typos."""
+        for token in row_tokens:
+            if query_token in token or token in query_token:
+                return True
+            if len(query_token) >= 3 and len(token) >= 3:
+                if difflib.SequenceMatcher(None, query_token, token).ratio() >= threshold:
+                    return True
+        return False
+
     def filter_table(self, text):
         self.search_text = text
-        search_lower = text.lower()
+        search_lower = text.strip().lower()
+
+        if not search_lower:
+            for row in range(self.table.rowCount()):
+                self.table.setRowHidden(row, False)
+            return
+
+        query_tokens = search_lower.split()
 
         for row in range(self.table.rowCount()):
-            if not search_lower:
-                self.table.setRowHidden(row, False)
-                continue
-
-            match = False
+            row_tokens = []
             for col in range(1, 5):
                 item = self.table.item(row, col)
-                if item and search_lower in item.text().lower():
-                    match = True
-                    break
+                if item and item.text():
+                    row_tokens.extend(item.text().lower().split())
+
+            match = all(
+                self._fuzzy_token_match(qt, row_tokens) for qt in query_tokens
+            )
             self.table.setRowHidden(row, not match)
 
     # ---------- Action buttons & operations ----------
@@ -2879,6 +2898,22 @@ class AllSalesOverviewDialog(QDialog):
         self._closed = False
         self.thread = None
         self.worker = None
+        self._retiring = []  # abandoned (thread, worker) pairs kept alive
+                              # until they finish, so PySide can't GC a
+                              # QThread while it's still actually running
+        self.search_version = 0
+        self._load_version = 0
+        self.fuzzy_mode = False
+        self._fuzzy_attempted = False
+
+        # Debounce timers
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.timeout.connect(self._perform_search)
+
+        self.date_search_timer = QTimer(self)
+        self.date_search_timer.setSingleShot(True)
+        self.date_search_timer.timeout.connect(self._perform_date_search)
         self.init_ui()
         self.setMinimumSize(0, 0)
         self.setMaximumSize(16777215, 16777215)
@@ -2999,6 +3034,13 @@ class AllSalesOverviewDialog(QDialog):
 
         content_layout.addWidget(self.table, 1)
 
+        self.fuzzy_status_label = QLabel("")
+        self.fuzzy_status_label.setAlignment(Qt.AlignCenter)
+        self.fuzzy_status_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        self.fuzzy_status_label.setStyleSheet("color: #f39c12;")
+        self.fuzzy_status_label.hide()
+        content_layout.addWidget(self.fuzzy_status_label)
+
         # Loading indicator
         self.loading_label = QLabel("Loading sales data, please wait...")
         self.loading_label.setAlignment(Qt.AlignCenter)
@@ -3010,12 +3052,25 @@ class AllSalesOverviewDialog(QDialog):
         main_layout.addWidget(content_widget, 1)
 
     def on_search_changed(self, text):
+        """Debounced search – triggers after 300ms of no typing."""
         self.current_search = text
+        self.fuzzy_mode = False          # reset to exact search
+        self._fuzzy_attempted = False    # allow fallback again
+        self.search_version += 1
+        self.search_timer.start(300)
+
+    def _perform_search(self):
+        """Actually load the first page with the current search term."""
         self.load_page(reset=True)
-    
+        
     def on_date_search_changed(self, text):
-        """Called when date search text changes."""
+        """Debounced date search."""
         self.current_date_search = text
+        self.search_version += 1          # date changes also count as a new search version
+        self.date_search_timer.start(300)
+
+    def _perform_date_search(self):
+        """Actually load the first page with the current date search term."""
         self.load_page(reset=True)
 
     def clear_date_search(self):
@@ -3059,9 +3114,37 @@ class AllSalesOverviewDialog(QDialog):
         """Parse the date search field and return Gregorian date or None."""
         return self.parse_ethiopian_date(self.date_search_edit.text())
 
-    def load_page(self, reset=False):
-        if self.is_loading or (not reset and self.all_loaded):
+    def _retire_thread(self, thread, worker):
+        """Detach an in-flight (now-superseded) thread/worker pair without
+        blocking, while keeping a Python reference around until it finishes
+        on its own — otherwise PySide can garbage-collect the QThread
+        wrapper while the underlying thread is still running."""
+        try:
+            thread.quit()
+        except RuntimeError:
             return
+        pair = (thread, worker)
+        self._retiring.append(pair)
+
+        def _cleanup():
+            if pair in self._retiring:
+                self._retiring.remove(pair)
+
+        thread.finished.connect(_cleanup)
+
+    def load_page(self, reset=False):
+        # A fresh search (reset=True) always supersedes whatever is in
+        # flight — never block the UI waiting on the old worker. Its
+        # eventual result is discarded by the _load_version check below
+        # once it arrives, so it's safe to just move on.
+        if not reset and (self.is_loading or self.all_loaded):
+            return
+
+        if self.thread is not None:
+            self._retire_thread(self.thread, self.worker)
+            self.thread = None
+            self.worker = None
+
         self.is_loading = True
 
         if reset:
@@ -3070,6 +3153,8 @@ class AllSalesOverviewDialog(QDialog):
             self.table.setRowCount(0)
             self.loading_label.show()
             self.table.hide()
+
+            self._load_version = self.search_version
 
         if reset:
             self.thread = QThread()
@@ -3093,14 +3178,32 @@ class AllSalesOverviewDialog(QDialog):
             page=self.current_page,
             page_size=self.page_size,
             search=self.current_search,
-            filter_date=filter_date
+            filter_date=filter_date,
+            fuzzy=self.fuzzy_mode
         )
         return sales, total
     
     def _on_page_loaded(self, result):
         if self._closed:
             return
+        if self._load_version != self.search_version:
+            self.is_loading = False
+            self.loading_label.hide()
+            self.table.show()
+            return
+
         sales, total = result
+
+        # Auto‑fallback fuzzy
+        if total == 0 and self.current_search and not self._fuzzy_attempted:
+            self.fuzzy_mode = True
+            self._fuzzy_attempted = True
+            self.is_loading = False
+            # Defer to avoid recursive thread issues
+            QTimer.singleShot(0, lambda: self.load_page(reset=True))
+            return
+
+        # Normal processing
         self.total_pages = (total + self.page_size - 1) // self.page_size
         self.append_rows(sales)
 
@@ -3109,7 +3212,14 @@ class AllSalesOverviewDialog(QDialog):
 
         self.current_page += 1
         self.is_loading = False
-        # self.update_status()
+
+        if self.fuzzy_mode and total > 0:
+            self.fuzzy_status_label.setText(
+                f"🔍 Showing fuzzy matches for '{self.current_search}'"
+            )
+            self.fuzzy_status_label.show()
+        else:
+            self.fuzzy_status_label.hide()
 
         self.loading_label.hide()
         self.table.show()
@@ -3131,7 +3241,8 @@ class AllSalesOverviewDialog(QDialog):
             page=self.current_page,
             page_size=self.page_size,
             search=self.current_search,
-            filter_date=filter_date
+            filter_date=filter_date,
+            fuzzy=self.fuzzy_mode
         )
         self.total_pages = (total + self.page_size - 1) // self.page_size
         self.append_rows(sales)
@@ -3363,21 +3474,39 @@ class AllSalesOverviewDialog(QDialog):
             self.load_page()
 
     
+    @staticmethod
+    def _fuzzy_token_match(query_token, row_tokens, threshold=0.6):
+        """Return True if query_token matches any row_token exactly,
+        as a substring, or closely enough to tolerate typos."""
+        for token in row_tokens:
+            if query_token in token or token in query_token:
+                return True
+            if len(query_token) >= 3 and len(token) >= 3:
+                if difflib.SequenceMatcher(None, query_token, token).ratio() >= threshold:
+                    return True
+        return False
+
     def filter_table(self, text):
-        """Hide rows that do not contain the search text in any visible column."""
-        search_lower = text.lower()
+        """Hide rows that do not fuzzy-match the search text in any visible column."""
+        search_lower = text.strip().lower()
+
+        if not search_lower:
+            for row in range(self.table.rowCount()):
+                self.table.setRowHidden(row, False)
+            return
+
+        query_tokens = search_lower.split()
 
         for row in range(self.table.rowCount()):
-            if not search_lower:
-                self.table.setRowHidden(row, False)
-                continue
-
-            match = False
+            row_tokens = []
             for col in range(6):
                 item = self.table.item(row, col)
-                if item and search_lower in item.text().lower():
-                    match = True
-                    break
+                if item and item.text():
+                    row_tokens.extend(item.text().lower().split())
+
+            match = all(
+                self._fuzzy_token_match(qt, row_tokens) for qt in query_tokens
+            )
             self.table.setRowHidden(row, not match)
 
     
@@ -3395,6 +3524,8 @@ class AllSalesOverviewDialog(QDialog):
     def closeEvent(self, event):
         """Stop background thread before closing to avoid accessing deleted widgets."""
         self._closed = True
+        self.search_timer.stop()
+        self.date_search_timer.stop()
         try:
             if hasattr(self, 'thread') and self.thread is not None and self.thread.isRunning():
                 self.thread.quit()
@@ -3786,6 +3917,13 @@ class ProfitDialog(QDialog):
         # Add asset card in the last position (now 6th card, fills row 1 col 2)
         asset_card = self._create_asset_card(asset_data, this_month_profit)
         self.cards_layout.addWidget(asset_card, row, col)
+        col += 1
+        if col >= 3:
+            col = 0
+            row += 1
+
+        top_card = self._create_top_products_card()
+        self.cards_layout.addWidget(top_card, row, col)
 
         self.loading_label.hide()
 
@@ -3799,6 +3937,73 @@ class ProfitDialog(QDialog):
             widget = self.cards_layout.itemAt(i).widget()
             if widget:
                 widget.deleteLater()
+
+    def _create_top_products_card(self) -> QFrame:
+        card = QFrame()
+        card.setFixedHeight(160)  # slightly shorter
+        card.setMinimumWidth(200)
+        card.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        card.setStyleSheet("""
+            QFrame {
+                background-color: #FFFFFF;
+                border-radius: 8px;
+                border: 2px solid #8e44ad;
+            }
+            QFrame:hover {
+                border: 2px solid #9b59b6;
+                background-color: #f8f9fa;
+            }
+        """)
+        card.setCursor(Qt.PointingHandCursor)
+
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(8)
+        shadow.setXOffset(0)
+        shadow.setYOffset(2)
+        shadow.setColor(QColor(0, 0, 0, 30))
+        card.setGraphicsEffect(shadow)
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QLabel("🏆 Top Products")
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet("""
+            QLabel {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #8e44ad, stop:1 #6c3483);
+                color: #FFFFFF;
+                font-weight: bold;
+                padding: 12px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                font-size: 13px;
+            }
+        """)
+        header.setFont(QFont("Segoe UI", 11, QFont.Bold))
+
+        value_label = QLabel("Click to view\nproduct performance")
+        value_label.setObjectName("value_label")
+        value_label.setStyleSheet("""
+            QLabel {
+                background-color: #FFFFFF;
+                color: #2c3e50;
+                padding: 20px 10px;
+                border-bottom-left-radius: 8px;
+                border-bottom-right-radius: 8px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+        """)
+        value_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        value_label.setAlignment(Qt.AlignCenter)
+
+        layout.addWidget(header)
+        layout.addWidget(value_label)
+
+        card.mousePressEvent = lambda event: self._open_top_products() if event.button() == Qt.LeftButton else None
+        return card
 
     # ---------- Card creation (with clickable Expenses) ----------
     def _create_period_card_with_data(self, period_name: str, start_date: date, end_date: date,
@@ -3945,6 +4150,10 @@ class ProfitDialog(QDialog):
             start_date=start_date,
             end_date=end_date
         )
+        dialog.exec()
+
+    def _open_top_products(self):
+        dialog = TopProductsDialog(self, self.current_user)
         dialog.exec()
     
     def _create_asset_card(self, asset_data: dict, this_month_profit: float) -> QFrame:
@@ -4634,3 +4843,938 @@ class MonthlySummaryDialog(QDialog):
         item.setFont(QFont("Segoe UI", 13, QFont.Bold))
         item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         return item
+
+class ThresholdSettingsDialog(QDialog):
+    def __init__(self, parent, current_threshold):
+        super().__init__(parent)
+        self.setWindowTitle("Low Margin Threshold Setting")
+        self.setMinimumWidth(350)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+
+        label = QLabel("Products with margin below this % are considered 'Low Margin':")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        self.spin = QDoubleSpinBox()
+        self.spin.setRange(0.0, 50.0)
+        self.spin.setSingleStep(0.5)
+        self.spin.setSuffix(" %")
+        self.spin.setValue(current_threshold)
+        self.spin.setFont(QFont("Segoe UI", 13))
+        layout.addWidget(self.spin)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+
+    def get_threshold(self) -> float:
+        return self.spin.value()
+
+
+class ProductMatrixDialog(QDialog):
+    def __init__(self, parent, data):
+        super().__init__(parent)
+        self.setWindowTitle("Product Performance Matrix (Margin vs Quantity)")
+        self.setMinimumSize(900, 700)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+
+        try:
+            import matplotlib
+            matplotlib.use('Qt5Agg')
+            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+            from matplotlib.figure import Figure
+            import matplotlib.pyplot as plt
+        except ImportError:
+            QMessageBox.critical(
+                self,
+                "Missing Library",
+                "Matplotlib is required for the matrix view.\n"
+                "Please install it: pip install matplotlib"
+            )
+            self.accept()
+            return
+
+        fig = Figure(figsize=(12, 8))
+        ax = fig.add_subplot(111)
+
+        # Prepare data
+        margins = []
+        quantities = []
+        labels = []
+        colors = []
+        category_colors = {
+            "Star": "#2ecc71",
+            "Cash Cow": "#f39c12",
+            "Question Mark": "#3498db",
+            "Dog": "#e67e22",
+            "Loss": "#e74c3c",
+            "Insufficient Data": "#95a5a6"
+        }
+
+        self.hover_data = []
+
+        for item in data:
+            if item['quantity'] > 0:
+                margins.append(item['margin'])
+                quantities.append(item['quantity'])
+                labels.append(item['product_name'])
+                cat = item.get('category', 'Dog')
+                colors.append(category_colors.get(cat, "#95a5a6"))
+                self.hover_data.append({
+                    'x': item['margin'],
+                    'y': item['quantity'],
+                    'label': item['product_name'],
+                    'category': cat
+                })
+
+        # Scatter plot
+        scatter = ax.scatter(margins, quantities, c=colors, alpha=0.7, s=100, edgecolors='black', linewidth=0.5, picker=True)
+
+        ax.set_xlabel("Margin (%)", fontsize=12)
+        ax.set_ylabel("Quantity Sold", fontsize=12)
+        ax.set_title("Product Portfolio Matrix\n(Margin vs Quantity)", fontsize=14)
+
+        ax.grid(True, linestyle='--', alpha=0.3)
+
+        # Annotate top 5 products by quantity (permanent)
+        sorted_data = sorted(data, key=lambda x: x['quantity'], reverse=True)
+        for i, item in enumerate(sorted_data[:5]):
+            if item['quantity'] > 0:
+                ax.annotate(
+                    item['product_name'][:15],
+                    (item['margin'], item['quantity']),
+                    fontsize=9,
+                    ha='center',
+                    va='bottom',
+                    bbox=dict(boxstyle='round,pad=0.3', fc='yellow', alpha=0.3)
+                )
+
+        ax.axvline(x=0, color='red', linestyle='--', alpha=0.5, label='Zero Profit')
+        median_margin = sorted(margins)[len(margins)//2] if margins else 0
+        ax.axvline(x=median_margin, color='gray', linestyle=':', alpha=0.5, label='Median Margin')
+
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor=category_colors["Star"], label="Star (High Margin, High Volume)"),
+            Patch(facecolor=category_colors["Cash Cow"], label="Cash Cow (Low Margin, High Volume)"),
+            Patch(facecolor=category_colors["Question Mark"], label="Question Mark (High Margin, Low Volume)"),
+            Patch(facecolor=category_colors["Dog"], label="Dog (Low Margin, Low Volume)"),
+            Patch(facecolor=category_colors["Loss"], label="Loss (Negative Margin)"),
+            Patch(facecolor=category_colors["Insufficient Data"], label="Insufficient Data"),
+        ]
+        ax.legend(handles=legend_elements, loc='upper left', fontsize=10)
+
+        # ---- FIX: Explicitly set X-axis limits ----
+        if margins:
+            x_min = min(margins) - 2   # 2% buffer
+            x_max = max(margins) + 2
+            ax.set_xlim(left=x_min, right=x_max)
+
+        ax.relim()
+        ax.autoscale_view(scalex=False, scaley=True)  # only scale Y automatically
+
+        # ---- HOVER TOOLTIP ----
+        self.hover_annotation = ax.annotate(
+            "", xy=(0, 0), xytext=(10, 10),
+            textcoords="offset points",
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8),
+            arrowprops=dict(arrowstyle="->", color="gray", lw=0.5),
+            fontsize=10,
+            visible=False
+        )
+
+        def on_hover(event):
+            if event.inaxes == ax:
+                cont, ind = scatter.contains(event)
+                if cont:
+                    idx = ind['ind'][0]
+                    self.hover_annotation.xy = (margins[idx], quantities[idx])
+                    self.hover_annotation.set_text(
+                        f"{labels[idx]}\nMargin: {margins[idx]:.1f}%\nQty: {quantities[idx]:.0f}"
+                    )
+                    self.hover_annotation.set_visible(True)
+                    fig.canvas.draw_idle()
+                else:
+                    if self.hover_annotation.get_visible():
+                        self.hover_annotation.set_visible(False)
+                        fig.canvas.draw_idle()
+            else:
+                if self.hover_annotation.get_visible():
+                    self.hover_annotation.set_visible(False)
+                    fig.canvas.draw_idle()
+
+        fig.canvas.mpl_connect("motion_notify_event", on_hover)
+
+        canvas = FigureCanvas(fig)
+        canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(canvas)
+
+        btn_close = QPushButton("Close")
+        btn_close.setFixedSize(100, 35)
+        btn_close.clicked.connect(self.accept)
+        layout.addWidget(btn_close, alignment=Qt.AlignRight)
+
+class TopProductsDialog(QDialog):
+    MAX_ROWS = 500
+
+    CATEGORY_MAP = {
+        "Loss": "ኪሳራ",
+        "Star": "ኮከብ",
+        "Cash Cow": "ተረጋጋ",
+        "Question Mark": "አዲስ",
+        "Dog": "ደካማ",
+        "Insufficient Data": "ውሱን መረጃ",
+    }
+    ROLE_MAP = {
+        "Loss Leader": "መስህብ",
+        "Breakeven Helper": "ረዳት",
+        "Profitable": "ትርፋማ",
+        "Loss": "ኪሳራ",
+        "Low Margin": "ትንሽ ትርፍ",
+    }
+    RECOMMENDATION_MAP = {
+        "Stop": "አቁም",
+        "Monitor": "ተከታተል",
+        "Keep": "ቀጥል",
+    }
+
+    def __init__(self, parent, current_user):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setWindowTitle("የምርት አፈጻጸም (Product Performance)")
+        self.setMinimumSize(1100, 700)   # slightly wider to fit controls
+        self.resize(1300, 800)
+        self.setWindowFlags(
+            Qt.Window |
+            Qt.WindowCloseButtonHint |
+            Qt.WindowMinimizeButtonHint |
+            Qt.WindowMaximizeButtonHint |
+            Qt.CustomizeWindowHint
+        )
+        self.current_user = current_user
+        self.sale_service = NewSaleService()
+        self.raw_data = []
+        self.filtered_data = []
+        self.is_loading_data = False
+        self.is_sorting = False
+        self._columns_sized = False
+        self.current_filter = "All"
+        self.current_sort_index = 0
+        self.low_margin_threshold = 4.0
+
+        self.init_ui()
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
+        screen_geometry = QApplication.primaryScreen().availableGeometry()
+        self.setGeometry(screen_geometry)
+
+        # Set default date range: last 3 Ethiopian months
+        self._set_default_date_range()
+
+    def _set_default_date_range(self):
+        today = date.today()
+        eth_year, eth_month, eth_day = EthiopianDateConverter.to_ethiopian(today)
+        start_year, start_month = self._add_ethiopian_months(eth_year, eth_month, -3)
+        start_greg = EthiopianDateConverter.to_gregorian(start_year, start_month, 1)
+        end_greg = today
+        self.start_date_edit.setText(f"01/{start_month:02d}/{start_year:04d}")
+        self.end_date_edit.setText(f"{eth_day:02d}/{eth_month:02d}/{eth_year:04d}")
+        self.load_period(start_greg, end_greg)
+
+    def _add_ethiopian_months(self, year: int, month: int, months: int) -> Tuple[int, int]:
+        total = year * 13 + (month - 1) + months
+        new_year = total // 13
+        new_month = (total % 13) + 1
+        return new_year, new_month
+
+    def parse_ethiopian_date(self, date_str: str) -> Optional[date]:
+        if not date_str or not date_str.strip():
+            return None
+        parts = date_str.strip().split('/')
+        if len(parts) != 3:
+            return None
+        try:
+            d = int(parts[0])
+            m = int(parts[1])
+            y = int(parts[2])
+            if m < 1 or m > 13 or d < 1 or d > 30:
+                return None
+            if m == 13 and d > 6:
+                return None
+            return EthiopianDateConverter.to_gregorian(y, m, d)
+        except:
+            return None
+
+    def get_date_range(self) -> Tuple[Optional[date], Optional[date]]:
+        start = self.parse_ethiopian_date(self.start_date_edit.text())
+        end = self.parse_ethiopian_date(self.end_date_edit.text())
+        if start and end and start > end:
+            QMessageBox.warning(self, "Invalid Range", "Start date must be before end date.")
+            return None, None
+        return start, end
+
+    def apply_date_range(self):
+        start, end = self.get_date_range()
+        if start is None and self.start_date_edit.text():
+            QMessageBox.warning(self, "Invalid Date", "Start date format must be DD/MM/YYYY")
+            return
+        if end is None and self.end_date_edit.text():
+            QMessageBox.warning(self, "Invalid Date", "End date format must be DD/MM/YYYY")
+            return
+        self.load_period(start, end)
+
+    def reset_date_range(self):
+        self.start_date_edit.clear()
+        self.end_date_edit.clear()
+        self.load_period(None, None)   # all time
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # Top toolbar
+        top_layout = QHBoxLayout()
+
+        # ---- Date range ----
+        date_layout = QHBoxLayout()
+        date_layout.setSpacing(8)
+        start_label = QLabel("From:")
+        start_label.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        self.start_date_edit = QLineEdit()
+        self.start_date_edit.setPlaceholderText("DD/MM/YYYY")
+        self.start_date_edit.setMaximumWidth(110)
+        self.start_date_edit.setMinimumHeight(30)
+        self.start_date_edit.setStyleSheet("font-size: 12px; padding: 4px;")
+
+        end_label = QLabel("To:")
+        end_label.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        self.end_date_edit = QLineEdit()
+        self.end_date_edit.setPlaceholderText("DD/MM/YYYY")
+        self.end_date_edit.setMaximumWidth(110)
+        self.end_date_edit.setMinimumHeight(30)
+        self.end_date_edit.setStyleSheet("font-size: 12px; padding: 4px;")
+
+        apply_btn = QPushButton("Apply Date")
+        apply_btn.setFixedHeight(30)
+        apply_btn.setStyleSheet("background-color: #3498db; color: white; border: none; border-radius: 4px; padding: 4px 12px; font-weight: bold;")
+        apply_btn.clicked.connect(self.apply_date_range)
+
+        reset_btn = QPushButton("All Time")
+        reset_btn.setFixedHeight(30)
+        reset_btn.setStyleSheet("background-color: #95a5a6; color: white; border: none; border-radius: 4px; padding: 4px 12px; font-weight: bold;")
+        reset_btn.clicked.connect(self.reset_date_range)
+
+        date_layout.addWidget(start_label)
+        date_layout.addWidget(self.start_date_edit)
+        date_layout.addWidget(end_label)
+        date_layout.addWidget(self.end_date_edit)
+        date_layout.addWidget(apply_btn)
+        date_layout.addWidget(reset_btn)
+        date_layout.addStretch()
+
+        top_layout.addLayout(date_layout)
+
+        # ---- Role filter ----
+        filter_label = QLabel("ማጣሪያ (Filter):")
+        filter_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        top_layout.addWidget(filter_label)
+
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems([
+            "ሁሉም (All)",
+            "መስህብ (Loss Leader)",
+            "ረዳት (Breakeven Helper)",
+            "ትርፋማ (Profitable)",
+            "ኪሳራ (Loss)",
+            "ትንሽ ትርፍ (Low Margin)"
+        ])
+        self.filter_combo.setFont(QFont("Noto Sans Ethiopic", 11))
+        self.filter_combo.setStyleSheet("""
+            QComboBox, QComboBox QAbstractItemView {
+                font-family: "Noto Sans Ethiopic", "Nyala", "Abyssinica SIL", "Ebrima", "Segoe UI", sans-serif;
+                font-size: 12px;
+            }
+        """)
+        self.filter_combo.setCurrentIndex(0)
+        self.filter_combo.currentIndexChanged.connect(self.on_filter_changed)
+        top_layout.addWidget(self.filter_combo)
+
+        # ---- Category filter ----
+        self.sort_timer = QTimer()
+        self.sort_timer.setSingleShot(True)
+        self.sort_timer.timeout.connect(self.apply_filter_and_sort)
+
+        cat_label = QLabel("ምድብ (Category):")
+        cat_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        top_layout.addWidget(cat_label)
+
+        self.category_combo = QComboBox()
+        self.category_combo.addItems([
+            "ሁሉም (All)",
+            "ኮከብ (Star)",
+            "ተረጋጋ (Cash Cow)",
+            "አዲስ (Question Mark)",
+            "ደካማ (Dog)",
+            "ኪሳራ (Loss)",
+            "ውሱን መረጃ (Insufficient Data)"
+        ])
+        self.category_combo.setFont(QFont("Noto Sans Ethiopic", 11))
+        self.category_combo.setStyleSheet("""
+            QComboBox, QComboBox QAbstractItemView {
+                font-family: "Noto Sans Ethiopic", "Nyala", "Abyssinica SIL", "Ebrima", "Segoe UI", sans-serif;
+                font-size: 12px;
+            }
+        """)
+        self.category_combo.setCurrentIndex(0)
+        self.category_combo.currentIndexChanged.connect(self.sort_timer.start)
+        top_layout.addWidget(self.category_combo)
+
+        # ---- Recommendation filter ----
+        rec_label = QLabel("ምክር (Recommend):")
+        rec_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        top_layout.addWidget(rec_label)
+
+        self.rec_combo = QComboBox()
+        self.rec_combo.addItems([
+            "ሁሉም (All)",
+            "🟢 ቀጥል (Keep)",
+            "🟡 ተከታተል (Monitor)",
+            "🔴 አቁም (Stop)"
+        ])
+        self.rec_combo.setFont(QFont("Noto Sans Ethiopic", 11))
+        self.rec_combo.setStyleSheet("""
+            QComboBox, QComboBox QAbstractItemView {
+                font-family: "Noto Sans Ethiopic", "Nyala", "Abyssinica SIL", "Ebrima", "Segoe UI", sans-serif;
+                font-size: 12px;
+            }
+        """)
+        self.rec_combo.setCurrentIndex(0)
+        self.rec_combo.currentIndexChanged.connect(self.sort_timer.start)
+        top_layout.addWidget(self.rec_combo)
+
+        top_layout.addSpacing(10)
+
+        # ---- Sort combo ----
+        sort_label = QLabel("ደርድር (Sort):")
+        sort_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        top_layout.addWidget(sort_label)
+
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems([
+            "ትርፍ (ከፍ ወደ ዝቅ)",
+            "ትርፍ (ዝቅ ወደ ከፍ)",
+            "የትርፍ መጠን (%)",
+            "የተሸጠ ብዛት",
+            "ROI (%)",
+            "አስተዋፅኦ (%)",
+            "በአንድ ክፍል ትርፍ",
+            "የአጋር ትርፍ (%)"
+        ])
+        self.sort_combo.setFont(QFont("Noto Sans Ethiopic", 11))
+        self.sort_combo.setStyleSheet("""
+            QComboBox, QComboBox QAbstractItemView {
+                font-family: "Noto Sans Ethiopic", "Nyala", "Abyssinica SIL", "Ebrima", "Segoe UI", sans-serif;
+                font-size: 12px;
+            }
+        """)
+        self.sort_combo.setCurrentIndex(0)
+        self.sort_combo.currentIndexChanged.connect(self.sort_timer.start)
+        top_layout.addWidget(self.sort_combo)
+
+        layout.addLayout(top_layout)
+
+        # ---- Table ----
+        headers = [
+            "#", "ምርት (Product)", "የተሸጠ ብዛት", "የክምችት ዕድሜ (Days)",
+            "በአንድ ክፍል ትርፍ", "ጠቅላላ ወጪ", "ጠቅላላ ሽያጭ", "ትርፍ",
+            "ROI (%)", "የትርፍ መጠን (%)", "አስተዋፅኦ (%)",
+            "የአጋር ትርፍ (%)", "አዝማሚያ (Trend)",
+            "ምድብ", "ሚና", "ምክር"
+        ]
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Interactive)
+        for i in range(2, len(headers)):
+            header.setSectionResizeMode(i, QHeaderView.Interactive)
+
+        self.table.setAlternatingRowColors(True)
+        self.table.setFont(QFont("Noto Sans Ethiopic", 13, QFont.Bold))
+        self.table.verticalHeader().setDefaultSectionSize(55)
+
+        self.table.setStyleSheet("""
+            QTableWidget {
+                font-family: "Noto Sans Ethiopic", "Nyala", "Abyssinica SIL", "Ebrima", "Segoe UI", sans-serif;
+                font-size: 15px;
+                font-weight: bold;
+                background-color: white;
+                alternate-background-color: #f8f9fa;
+                gridline-color: #dee2e6;
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+            }
+            QHeaderView::section {
+                font-family: "Noto Sans Ethiopic", "Nyala", "Abyssinica SIL", "Ebrima", "Segoe UI", sans-serif;
+                background-color: #2c3e50;
+                color: white;
+                padding: 12px;
+                font-weight: bold;
+                font-size: 15px;
+                border: none;
+            }
+            QTableWidget::item {
+                font-family: "Noto Sans Ethiopic", "Nyala", "Abyssinica SIL", "Ebrima", "Segoe UI", sans-serif;
+                padding: 10px;
+            }
+        """)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSortingEnabled(False)
+
+        layout.addWidget(self.table, 1)
+
+        # ---- Loading label ----
+        self.loading_label = QLabel("እባክዎ ይጠብቁ... መረጃ እየጫነ ነው (Loading...)")
+        self.loading_label.setAlignment(Qt.AlignCenter)
+        self.loading_label.setFont(QFont("Noto Sans Ethiopic", 13, QFont.Bold))
+        self.loading_label.hide()
+        layout.addWidget(self.loading_label)
+
+        # ---- Bottom action buttons ----
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setSpacing(10)
+
+        export_btn = QPushButton("📥 Export CSV")
+        export_btn.setFont(QFont("Segoe UI", 11))
+        export_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #1e8449; }
+        """)
+        export_btn.clicked.connect(self.export_csv)
+        bottom_layout.addWidget(export_btn)
+
+        settings_btn = QPushButton("⚙️ Threshold")
+        settings_btn.setFont(QFont("Segoe UI", 11))
+        settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #34495e;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #2c3e50; }
+        """)
+        settings_btn.clicked.connect(self.open_threshold_settings)
+        bottom_layout.addWidget(settings_btn)
+
+        # Matrix button – store reference
+        matrix_btn = QPushButton("📊 Matrix")
+        matrix_btn.setFont(QFont("Segoe UI", 11))
+        matrix_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #8e44ad;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #6c3483; }
+        """)
+        matrix_btn.clicked.connect(self.open_matrix)
+        self.matrix_btn = matrix_btn
+        bottom_layout.addWidget(matrix_btn)
+
+        bottom_layout.addStretch()
+
+        btn_close = QPushButton("ዝጋ (Close)")
+        btn_close.setFixedSize(120, 40)
+        btn_close.setStyleSheet("""
+            QPushButton {
+                background-color: #e0e0e0;
+                color: #2c3e50;
+                border: none;
+                border-radius: 6px;
+                font-weight: bold;
+                font-size: 14px;
+                font-family: "Noto Sans Ethiopic", "Segoe UI", sans-serif;
+            }
+            QPushButton:hover { background-color: #d5d5d5; }
+        """)
+        btn_close.clicked.connect(self.accept)
+        bottom_layout.addWidget(btn_close)
+
+        layout.addLayout(bottom_layout)
+
+    # -------------------- Data Loading --------------------
+    def load_period(self, start_date: Optional[date], end_date: Optional[date]):
+        if start_date is None:
+            start_date = date(2000, 1, 1)
+        if end_date is None:
+            end_date = date.today()
+        self.is_loading_data = True
+        self.filter_combo.setEnabled(False)
+        self.category_combo.setEnabled(False)
+        self.rec_combo.setEnabled(False)
+        self.sort_combo.setEnabled(False)
+        self.matrix_btn.setEnabled(False)   # disable matrix while loading
+        self.loading_label.show()
+        self.table.hide()
+
+        self.thread = QThread()
+        self.worker = Worker(
+            self.sale_service.get_product_performance_with_companions,
+            start_date, end_date, self.low_margin_threshold
+        )
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self._on_data_loaded)
+        self.worker.error.connect(self._on_error)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.start()
+
+    def _on_data_loaded(self, data):
+        self.raw_data = data
+        self.is_loading_data = False
+        self.filter_combo.setEnabled(True)
+        self.category_combo.setEnabled(True)
+        self.rec_combo.setEnabled(True)
+        self.sort_combo.setEnabled(True)
+        self.matrix_btn.setEnabled(True)   # re-enable
+        self.loading_label.hide()
+        self.table.show()
+        self.apply_filter_and_sort()
+
+    def _on_error(self, error):
+        self.is_loading_data = False
+        self.filter_combo.setEnabled(True)
+        self.category_combo.setEnabled(True)
+        self.rec_combo.setEnabled(True)
+        self.sort_combo.setEnabled(True)
+        self.matrix_btn.setEnabled(True)   # re-enable even on error
+        self.loading_label.setText(f"ስህተት (Error): {error}")
+        QMessageBox.critical(self, "ስህተት (Error)", f"ውሂብ ማግኘት አልተቻለም:\n{error}")
+        self.loading_label.hide()
+        self.table.show()
+
+    def on_filter_changed(self):
+        filter_text = self.filter_combo.currentText()
+        if "(" in filter_text and ")" in filter_text:
+            self.current_filter = filter_text.split("(")[1].split(")")[0]
+        else:
+            self.current_filter = "All"
+        self.apply_filter_and_sort()
+
+    def apply_filter_and_sort(self):
+        if self.is_loading_data or self.is_sorting or not self.raw_data:
+            return
+        self.is_sorting = True
+
+        # Role filter
+        filter_text = self.filter_combo.currentText()
+        role_filter = "All"
+        if "(" in filter_text and ")" in filter_text:
+            role_filter = filter_text.split("(")[1].split(")")[0]
+
+        # Category filter
+        cat_text = self.category_combo.currentText()
+        cat_filter = "All"
+        if "(" in cat_text and ")" in cat_text:
+            cat_filter = cat_text.split("(")[1].split(")")[0]
+
+        # Recommendation filter
+        rec_text = self.rec_combo.currentText()
+        rec_filter = "All"
+        if "(" in rec_text and ")" in rec_text:
+            rec_text_clean = rec_text.split("(")[1].split(")")[0]
+            rec_map = {"ቀጥል": "Keep", "ተከታተል": "Monitor", "አቁም": "Stop"}
+            rec_filter = rec_map.get(rec_text_clean, "All")
+
+        # Apply filters
+        self.filtered_data = self.raw_data.copy()
+        if role_filter != "All":
+            self.filtered_data = [d for d in self.filtered_data if d.get('role') == role_filter]
+        if cat_filter != "All":
+            cat_map = {"Star": "Star", "Cash Cow": "Cash Cow", "Question Mark": "Question Mark", "Dog": "Dog", "Loss": "Loss", "Insufficient Data": "Insufficient Data"}
+            self.filtered_data = [d for d in self.filtered_data if d.get('category') == cat_map.get(cat_filter)]
+        if rec_filter != "All":
+            self.filtered_data = [d for d in self.filtered_data if self._classify(d)[1] == rec_filter]
+
+        # Sorting
+        sort_index = self.sort_combo.currentIndex()
+        sort_map = {
+            0: ('profit', True),
+            1: ('profit', False),
+            2: ('margin', True),
+            3: ('quantity', True),
+            4: ('roi', True),
+            5: ('contribution', True),
+            6: ('profit_per_unit', True),
+            7: ('companion_margin', True),
+        }
+        key, reverse = sort_map.get(sort_index, ('profit', True))
+        self.filtered_data.sort(key=lambda x: x.get(key, 0) if x.get(key) is not None else 0, reverse=reverse)
+
+        if len(self.filtered_data) > self.MAX_ROWS:
+            self.filtered_data = self.filtered_data[:self.MAX_ROWS]
+
+        self.populate_table(self.filtered_data)
+        self.is_sorting = False
+
+    # -------------------- Table Population --------------------
+    def populate_table(self, data):
+        self.table.setUpdatesEnabled(False)
+        self.table.setRowCount(len(data))
+        for row, item in enumerate(data):
+            # 0: Rank
+            rank_item = QTableWidgetItem(str(row + 1))
+            rank_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 0, rank_item)
+
+            # 1: Product
+            self.table.setItem(row, 1, QTableWidgetItem(item['product_name']))
+
+            # 2: Quantity
+            qty_item = QTableWidgetItem(str(item['quantity']))
+            qty_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 2, qty_item)
+
+            # 3: Stock Age (Days)
+            stock_age = item.get('stock_age_days')
+            if stock_age is not None:
+                age_item = QTableWidgetItem(f"{stock_age} days")
+                if stock_age > 90:
+                    age_item.setForeground(QColor("#e74c3c"))
+                elif stock_age > 30:
+                    age_item.setForeground(QColor("#f39c12"))
+                else:
+                    age_item.setForeground(QColor("#27ae60"))
+            else:
+                age_item = QTableWidgetItem("—")
+            age_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 3, age_item)
+
+            # 4: Profit per Unit
+            self.table.setItem(row, 4, self._amount_item(item.get('profit_per_unit', 0.0)))
+
+            # 5: Total Cost
+            self.table.setItem(row, 5, self._amount_item(item['total_cost']))
+
+            # 6: Total Selling
+            self.table.setItem(row, 6, self._amount_item(item['total_selling']))
+
+            # 7: Profit
+            profit_item = self._amount_item(item['profit'])
+            profit_item.setForeground(QColor("#27ae60" if item['profit'] >= 0 else "#e74c3c"))
+            self.table.setItem(row, 7, profit_item)
+
+            # 8: ROI
+            self.table.setItem(row, 8, self._percent_item(item['roi']))
+
+            # 9: Margin %
+            self.table.setItem(row, 9, self._percent_item(item['margin']))
+
+            # 10: Contribution %
+            self.table.setItem(row, 10, self._percent_item(item['contribution']))
+
+            # 11: Companion Margin (%)
+            comp_margin = item.get('companion_margin')
+            if comp_margin is not None:
+                comp_item = self._percent_item(comp_margin)
+            else:
+                comp_item = QTableWidgetItem("—")
+            comp_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.table.setItem(row, 11, comp_item)
+
+            # 12: Trend
+            trend = item.get('trend')
+            if trend is not None:
+                if trend > 0:
+                    trend_item = QTableWidgetItem(f"▲ {trend:+.2f}%")
+                    trend_item.setForeground(QColor("#27ae60"))
+                elif trend < 0:
+                    trend_item = QTableWidgetItem(f"▼ {trend:+.2f}%")
+                    trend_item.setForeground(QColor("#e74c3c"))
+                else:
+                    trend_item = QTableWidgetItem("—")
+                    trend_item.setForeground(QColor("#7f8c8d"))
+            else:
+                trend_item = QTableWidgetItem("—")
+            trend_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 12, trend_item)
+
+            # 13: Category (BCG)
+            eng_cat = item.get('category', '')
+            amh_cat = self.CATEGORY_MAP.get(eng_cat, eng_cat)
+            cat_item = QTableWidgetItem(amh_cat)
+            cat_colors = {
+                "Star": "#27ae60",
+                "Cash Cow": "#f39c12",
+                "Question Mark": "#3498db",
+                "Dog": "#e67e22",
+                "Loss": "#e74c3c",
+                "Insufficient Data": "#95a5a6"
+            }
+            cat_item.setForeground(QColor(cat_colors.get(eng_cat, "#7f8c8d")))
+            cat_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 13, cat_item)
+
+            # 14: Role
+            eng_role = item.get('role', '')
+            amh_role = self.ROLE_MAP.get(eng_role, eng_role)
+            role_item = QTableWidgetItem(amh_role)
+            role_colors = {
+                "Loss Leader": "#9b59b6",
+                "Breakeven Helper": "#f1c40f",
+                "Profitable": "#2ecc71",
+                "Loss": "#e74c3c",
+                "Low Margin": "#e67e22"
+            }
+            role_item.setForeground(QColor(role_colors.get(eng_role, "#7f8c8d")))
+            role_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 14, role_item)
+
+            # 15: Recommendation
+            icon, eng_text, color = self._classify(item)
+            amh_text = self.RECOMMENDATION_MAP.get(eng_text, eng_text)
+            rec_item = QTableWidgetItem(f"{icon} {amh_text}")
+            rec_item.setForeground(QColor(color))
+            rec_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 15, rec_item)
+
+        self.table.setUpdatesEnabled(True)
+
+        if not self._columns_sized:
+            # Set reasonable column widths (compact for 14‑inch)
+            self.table.setColumnWidth(0, 35)
+            self.table.setColumnWidth(2, 80)
+            self.table.setColumnWidth(3, 100)
+            self.table.setColumnWidth(4, 100)
+            self.table.setColumnWidth(5, 100)
+            self.table.setColumnWidth(6, 100)
+            self.table.setColumnWidth(7, 100)
+            self.table.setColumnWidth(8, 80)
+            self.table.setColumnWidth(9, 100)
+            self.table.setColumnWidth(10, 100)
+            self.table.setColumnWidth(11, 110)
+            self.table.setColumnWidth(12, 100)
+            self.table.setColumnWidth(13, 90)
+            self.table.setColumnWidth(14, 100)
+            self.table.setColumnWidth(15, 100)
+            # Product column: stretch but limit to 200px
+            self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
+            self.table.setColumnWidth(1, 200)
+            self._columns_sized = True
+
+    # -------------------- Helper methods --------------------
+    def _classify(self, item):
+        if item['profit'] <= 0:
+            return "🔴", "Stop", "#e74c3c"
+        elif item['margin'] < self.low_margin_threshold:
+            return "🟡", "Monitor", "#f39c12"
+        else:
+            return "🟢", "Keep", "#27ae60"
+
+    def _amount_item(self, value):
+        item = QTableWidgetItem(f"${value:,.2f}")
+        item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        return item
+
+    def _percent_item(self, value):
+        item = QTableWidgetItem(f"{value:.2f}%")
+        item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        return item
+
+    # -------------------- Button actions --------------------
+    def open_threshold_settings(self):
+        dialog = ThresholdSettingsDialog(self, self.low_margin_threshold)
+        if dialog.exec() == QDialog.Accepted:
+            new_threshold = dialog.get_threshold()
+            if new_threshold != self.low_margin_threshold:
+                self.low_margin_threshold = new_threshold
+                # Reload with current date range
+                start, end = self.get_date_range()
+                self.load_period(start, end)
+
+    def open_matrix(self):
+        # Guard against stale data and loading state
+        if self.is_loading_data:
+            QMessageBox.information(self, "Loading", "Data is still loading, please wait.")
+            return
+        if not self.raw_data:
+            QMessageBox.information(self, "No Data", "No data to display.")
+            return
+        dialog = ProductMatrixDialog(self, self.raw_data)
+        dialog.exec()
+
+    def export_csv(self):
+        from PySide6.QtWidgets import QFileDialog
+        import csv
+        from datetime import datetime
+
+        if not self.filtered_data:
+            QMessageBox.information(self, "No Data", "No data to export.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save CSV", f"product_performance_{datetime.now().strftime('%Y%m%d')}.csv",
+            "CSV Files (*.csv)"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "Rank", "Product", "Quantity Sold", "Stock Age (Days)",
+                    "Profit per Unit", "Total Cost", "Total Selling", "Profit",
+                    "ROI (%)", "Margin (%)", "Contribution (%)",
+                    "Companion Margin (%)", "Trend (%)",
+                    "Category", "Role", "Recommendation"
+                ])
+                for rank, item in enumerate(self.filtered_data, 1):
+                    writer.writerow([
+                        rank,
+                        item['product_name'],
+                        item['quantity'],
+                        item.get('stock_age_days', ''),
+                        f"{item.get('profit_per_unit', 0):.2f}",
+                        f"{item['total_cost']:.2f}",
+                        f"{item['total_selling']:.2f}",
+                        f"{item['profit']:.2f}",
+                        f"{item['roi']:.2f}",
+                        f"{item['margin']:.2f}",
+                        f"{item['contribution']:.2f}",
+                        f"{item.get('companion_margin', '')}",
+                        f"{item.get('trend', '')}",
+                        item.get('category', ''),
+                        item.get('role', ''),
+                        self._classify(item)[1]
+                    ])
+            QMessageBox.information(self, "Export Complete", f"Data exported to {file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Error writing CSV:\n{e}")

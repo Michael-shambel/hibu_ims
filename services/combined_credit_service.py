@@ -46,7 +46,7 @@ class CombinedCreditService:
 
     def get_combined_credit_overview(self) -> Dict:
             try:
-                sales_rows = self.sale_service.get_credit_sales_by_customer()
+                sales_rows = self.sale_service.get_credit_sales_by_customer(outstanding_only=True)
                 purchase_rows = self.purchase_service.get_credit_purchases_by_supplier()
                 loan_rows = self.cash_loan_service.get_cash_loan_balances_by_person()
             except Exception as exc:
@@ -174,7 +174,73 @@ class CombinedCreditService:
             return {"summary": summary, "rows": filtered_rows}
 
     def get_combined_credit_summary(self) -> Dict:
-        return self.get_combined_credit_overview()["summary"]
+        """Lightweight summary for the dashboard card (avoids building full row list)."""
+        try:
+            sales_rows = self.sale_service.get_credit_sales_by_customer(outstanding_only=True)
+            purchase_rows = self.purchase_service.get_credit_purchases_by_supplier()
+            loan_rows = self.cash_loan_service.get_cash_loan_balances_by_person()
+        except Exception as exc:
+            logger.error(f"Error loading combined credit summary: {exc}", exc_info=True)
+            return self._summary([])
+
+        grouped: Dict[str, Dict] = {}
+
+        for row in sales_rows:
+            remaining = float(row.get("remaining") or 0.0)
+            if remaining <= 0:
+                continue
+            key = self.build_match_key(row.get("customer_name", ""), row.get("customer_phone", ""))
+            if not key:
+                continue
+            entry = grouped.setdefault(key, {"has_sales": False, "has_purchases": False, "has_loans": False,
+                                               "credit_sales_remaining": 0.0, "credit_purchases_remaining": 0.0,
+                                               "loan_receivable_remaining": 0.0, "loan_payable_remaining": 0.0})
+            entry["has_sales"] = True
+            entry["credit_sales_remaining"] += remaining
+
+        for row in purchase_rows:
+            remaining = float(row.get("remaining") or 0.0)
+            if remaining <= 0:
+                continue
+            key = self.build_match_key(row.get("supplier_name", ""), row.get("supplier_phone", ""))
+            if not key:
+                continue
+            entry = grouped.setdefault(key, {"has_sales": False, "has_purchases": False, "has_loans": False,
+                                               "credit_sales_remaining": 0.0, "credit_purchases_remaining": 0.0,
+                                               "loan_receivable_remaining": 0.0, "loan_payable_remaining": 0.0})
+            entry["has_purchases"] = True
+            entry["credit_purchases_remaining"] += remaining
+
+        for row in loan_rows:
+            receivable = float(row.get("loan_receivable_remaining") or 0.0)
+            payable = float(row.get("loan_payable_remaining") or 0.0)
+            if receivable <= 0 and payable <= 0:
+                continue
+            key = self.build_match_key(row.get("person_name", ""), row.get("phone", ""))
+            if not key:
+                continue
+            entry = grouped.setdefault(key, {"has_sales": False, "has_purchases": False, "has_loans": False,
+                                               "credit_sales_remaining": 0.0, "credit_purchases_remaining": 0.0,
+                                               "loan_receivable_remaining": 0.0, "loan_payable_remaining": 0.0})
+            entry["has_loans"] = True
+            entry["loan_receivable_remaining"] += receivable
+            entry["loan_payable_remaining"] += payable
+
+        matched_rows = []
+        for entry in grouped.values():
+            category_count = sum([entry["has_sales"], entry["has_purchases"], entry["has_loans"]])
+            if category_count < 2:
+                continue
+            total_receivable = entry["credit_sales_remaining"] + entry["loan_receivable_remaining"]
+            total_payable = entry["credit_purchases_remaining"] + entry["loan_payable_remaining"]
+            if total_receivable <= 0 and total_payable <= 0:
+                continue
+            matched_rows.append({
+                "total_receivable": total_receivable,
+                "total_payable": total_payable,
+            })
+
+        return self._summary(matched_rows)
 
     @staticmethod
     def _empty_entry(name: str) -> Dict:

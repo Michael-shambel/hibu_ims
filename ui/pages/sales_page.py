@@ -3110,6 +3110,19 @@ class SalesManager(QWidget):
         # Always start with a fresh sale form when switching to this page
         # self.new_sale()
         self.update_same_day_credit_count()
+        self.refresh_product_combos()
+        self.load_customers()
+        walking = self.customer_service.get_by_name("walking customer")
+        if walking:
+            idx = self.customer_combo.findData(walking.id)
+            if idx >= 0:
+                self.customer_combo.setCurrentIndex(idx)
+            else:
+                # If walking customer exists but not in combo, reload list
+                self.refresh_customer_combo(select_id=walking.id)
+        else:
+            # Fallback: select first item (Select Customer)
+            self.customer_combo.setCurrentIndex(0)
     
     def reset_form(self):
         """Reset the entire sale form to a fresh state (same as new_sale)."""

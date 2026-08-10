@@ -41,8 +41,10 @@ class CreditPurchasesOverviewDialog(QDialog):
         self.init_ui()
         self.setMinimumSize(0, 0)
         self.setMaximumSize(16777215, 16777215)
-        screen_geometry = QApplication.primaryScreen().availableGeometry()
-        self.setGeometry(screen_geometry)
+        screen = QApplication.primaryScreen()
+        if screen:
+            screen_geometry = screen.availableGeometry()
+            self.setGeometry(screen_geometry)
         self.load_data()
 
     def init_ui(self):
@@ -169,6 +171,11 @@ class CreditPurchasesOverviewDialog(QDialog):
         if self._closed or self._abort:
             self.is_loading = False
             return
+        # Guard: object might be deleted by Qt if dialog closed during load
+        try:
+            self.is_loading
+        except RuntimeError:
+            return
         self.is_loading = False
         summary, suppliers = result
         self.summary = summary
@@ -183,6 +190,11 @@ class CreditPurchasesOverviewDialog(QDialog):
     def on_error(self, error):
         if self._closed or self._abort:
             self.is_loading = False
+            return
+        # Guard: object might be deleted by Qt if dialog closed during load
+        try:
+            self.loading_label
+        except RuntimeError:
             return
         self.is_loading = False
         self.loading_label.hide()
@@ -322,7 +334,6 @@ class CreditPurchasesOverviewDialog(QDialog):
         )
         dialog.setModal(False)
         dialog.show()
-        self.load_data()
 
     def show_payment_history(self, supp):
         from ui.pages.credit_purchases_overview_dialog import PurchasePaymentHistoryDialog
@@ -334,7 +345,6 @@ class CreditPurchasesOverviewDialog(QDialog):
         )
         dialog.setModal(False)
         dialog.show()
-        self.load_data()
 
     def pay_supplier(self, supp):
         dialog = CreditPaymentDialog(
@@ -358,6 +368,13 @@ class CreditPurchasesOverviewDialog(QDialog):
                 self.worker.error.disconnect(self.on_error)
             except (RuntimeError, TypeError):
                 pass
+
+        try:
+            if self.thread is not None and self.thread.isRunning():
+                self.thread.quit()
+                self.thread.wait(2000)
+        except RuntimeError:
+            pass
 
         self.thread = None
         self.worker = None
@@ -385,11 +402,17 @@ class SupplierPurchasesListDialog(QDialog):
         self.current_user = current_user
         self.purchase_ids = []
         self.grouped_data = []
+        self.is_loading = False
+        self.thread = None
+        self.worker = None
+        self._closed = False
         self.init_ui()
         self.setMinimumSize(0, 0)
         self.setMaximumSize(16777215, 16777215)
-        screen_geometry = QApplication.primaryScreen().availableGeometry()
-        self.setGeometry(screen_geometry)
+        screen = QApplication.primaryScreen()
+        if screen:
+            screen_geometry = screen.availableGeometry()
+            self.setGeometry(screen_geometry)
         self.load_data()
 
     def init_ui(self):
@@ -440,6 +463,12 @@ class SupplierPurchasesListDialog(QDialog):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
 
         layout.addWidget(self.table, 1)
+
+        self.loading_label = QLabel("Loading purchases, please wait...")
+        self.loading_label.setAlignment(Qt.AlignCenter)
+        self.loading_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        self.loading_label.hide()
+        layout.addWidget(self.loading_label)
 
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
@@ -500,91 +529,148 @@ class SupplierPurchasesListDialog(QDialog):
             return dt.strftime("%Y-%m-%d")
 
     def load_data(self):
+        if self.is_loading:
+            return
+        self.is_loading = True
+        self.loading_label.show()
+        self.table.hide()
+
+        self.thread = QThread()
+        self.worker = Worker(self._fetch_grouped_data)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self._on_data_loaded)
+        self.worker.error.connect(self._on_load_error)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.start()
+
+    def _fetch_grouped_data(self):
         from sqlalchemy import func
         from services.base_service import get_session
-        from models.supplier_credit_ledger import SupplierCreditLedger
         from models.purchase import Purchase
-
-        with get_session() as session:
-            self.purchase_ids = [row.id for row in session.query(Purchase.id).filter(
-                Purchase.supplier_id == self.supplier_id,
-                Purchase.is_deleted == False
-            ).all()]
-
-            rows = session.query(
-                SupplierCreditLedger.entry_date,
-                SupplierCreditLedger.entry_type,
-                func.sum(SupplierCreditLedger.debit).label('total_debit'),
-                func.sum(SupplierCreditLedger.credit).label('total_credit')
-            ).filter(
-                SupplierCreditLedger.supplier_id == self.supplier_id,
-                SupplierCreditLedger.is_deleted == False
-            ).group_by(
-                SupplierCreditLedger.entry_date,
-                SupplierCreditLedger.entry_type
-            ).order_by(SupplierCreditLedger.entry_date.asc()).all()
-
-        date_totals = {}
-        for row in rows:
-            d = row.entry_date
-            if d not in date_totals:
-                date_totals[d] = {'total_amount': 0.0, 'paid_amount': 0.0}
-
-            if row.entry_type == 'purchase':
-                date_totals[d]['total_amount'] += row.total_debit
-            elif row.entry_type == 'payment':
-                date_totals[d]['paid_amount'] += row.total_credit
-            else:
-                net = row.total_debit - row.total_credit
-                date_totals[d]['total_amount'] += net
+        from models.purchase_payment_term import PurchasePaymentTerm
+        from models.product_batch import ProductBatch
+        from collections import defaultdict
 
         with get_session() as session:
             purchases = session.query(Purchase).filter(
                 Purchase.supplier_id == self.supplier_id,
                 Purchase.is_deleted == False
             ).all()
-            pid_to_date = {p.id: p.purchase_date for p in purchases}
 
-            for d in date_totals:
-                date_totals[d]['purchase_ids'] = []
+            if not purchases:
+                return []
 
-            for pid, pdate in pid_to_date.items():
-                if pdate in date_totals:
-                    date_totals[pdate]['purchase_ids'].append(pid)
+            purchase_ids = [p.id for p in purchases]
+
+            batches = session.query(ProductBatch).filter(
+                ProductBatch.purchase_id.in_(purchase_ids),
+                ProductBatch.is_deleted == False
+            ).all()
+            batches_by_purchase = defaultdict(list)
+            for batch in batches:
+                batches_by_purchase[batch.purchase_id].append(batch)
+
+            paid_results = session.query(
+                PurchasePaymentTerm.purchase_id,
+                func.sum(PurchasePaymentTerm.paid_amount).label('paid_amount')
+            ).filter(
+                PurchasePaymentTerm.purchase_id.in_(purchase_ids),
+                PurchasePaymentTerm.is_deleted == False
+            ).group_by(
+                PurchasePaymentTerm.purchase_id
+            ).all()
+            paid_dict = {r.purchase_id: float(r.paid_amount) for r in paid_results}
+
+            purchase_totals = {}
+            for p in purchases:
+                total = 0.0
+                purchase_batches = batches_by_purchase.get(p.id, [])
+                if purchase_batches:
+                    for batch in purchase_batches:
+                        product = batch.product
+                        dozen = product.dozen if product and product.dozen else 1
+                        total += batch.quantity * batch.cost_price * dozen
+                elif p.items_data and isinstance(p.items_data, list):
+                    for item in p.items_data:
+                        qty = item.get('quantity', 0)
+                        cost = item.get('cost_price', 0.0)
+                        dozen = item.get('dozen', 1)
+                        total += qty * cost * dozen
+                purchase_totals[p.id] = total
+
+            date_totals = defaultdict(lambda: {'total': 0.0, 'paid': 0.0, 'purchase_ids': []})
+            for p in purchases:
+                pdate = p.purchase_date
+                if pdate is None:
+                    continue
+                date_totals[pdate]['total'] += purchase_totals.get(p.id, 0.0)
+                date_totals[pdate]['paid'] += paid_dict.get(p.id, 0.0)
+                date_totals[pdate]['purchase_ids'].append(p.id)
+
+            grouped_data = []
+            for group_date, data in date_totals.items():
+                remaining = data['total'] - data['paid']
+                if remaining <= 0:
+                    status = 'Paid'
+                elif data['paid'] > 0:
+                    status = 'Partial'
                 else:
-                    if pdate not in date_totals:
-                        date_totals[pdate] = {'total_amount': 0.0, 'paid_amount': 0.0, 'purchase_ids': []}
-                    date_totals[pdate]['purchase_ids'].append(pid)
+                    status = 'Unpaid'
 
-        self.grouped_data = []
-        for group_date, data in date_totals.items():
-            remaining = data['total_amount'] - data['paid_amount']
-            if remaining <= 0:
-                status = 'Paid'
-            elif data['paid_amount'] > 0:
-                status = 'Partial'
-            else:
-                status = 'Unpaid'
+                grouped_data.append({
+                    'purchase_date': group_date,
+                    'total_amount': data['total'],
+                    'paid_amount': data['paid'],
+                    'remaining': remaining,
+                    'status': status,
+                    'purchase_ids': data['purchase_ids'],
+                    'payment_term_ids': [],
+                    'is_unknown': False
+                })
 
-            self.grouped_data.append({
-                'purchase_date': group_date,
-                'total_amount': data['total_amount'],
-                'paid_amount': data['paid_amount'],
-                'remaining': remaining,
-                'status': status,
-                'purchase_ids': data.get('purchase_ids', []),
-                'payment_term_ids': [],
-                'is_unknown': group_date is None
-            })
+            def sort_key(entry):
+                return (0, -entry['purchase_date'].toordinal()) if entry['purchase_date'] else (1, None)
 
-        # Sort newest first
-        def sort_key(entry):
-            if entry['is_unknown'] or entry['purchase_date'] is None:
-                return (1, None)
-            return (0, -entry['purchase_date'].toordinal())
+            grouped_data.sort(key=sort_key)
+            return grouped_data
 
-        self.grouped_data.sort(key=sort_key)
+    def _on_data_loaded(self, grouped_data):
+        if self._closed:
+            return
+        try:
+            self.is_loading
+        except RuntimeError:
+            return
+        self.is_loading = False
+        self.grouped_data = grouped_data
         self.populate_table()
+        self.loading_label.hide()
+        self.table.show()
+
+    def _on_load_error(self, error):
+        if self._closed:
+            return
+        try:
+            self.loading_label
+        except RuntimeError:
+            return
+        self.is_loading = False
+        self.loading_label.hide()
+        self.table.show()
+        QMessageBox.critical(self, "Error", f"Failed to load purchases:\n{error}")
+
+    def closeEvent(self, event):
+        self._closed = True
+        try:
+            if self.thread is not None and self.thread.isRunning():
+                self.thread.quit()
+                self.thread.wait(2000)
+        except RuntimeError:
+            pass
+        event.accept()
 
     def populate_table(self):
         self.table.setRowCount(len(self.grouped_data))
@@ -731,8 +817,10 @@ class PurchasePaymentHistoryDialog(QDialog):
         self.init_ui()
         self.setMinimumSize(0, 0)
         self.setMaximumSize(16777215, 16777215)
-        screen_geometry = QApplication.primaryScreen().availableGeometry()
-        self.setGeometry(screen_geometry)
+        screen = QApplication.primaryScreen()
+        if screen:
+            screen_geometry = screen.availableGeometry()
+            self.setGeometry(screen_geometry)
         self.load_data()
 
     def init_ui(self):

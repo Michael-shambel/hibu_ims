@@ -44,6 +44,7 @@ class CombinedCreditOverviewDialog(QDialog):
         self.is_loading = False
         self.thread = None
         self.worker = None
+        self._closed = False
 
         self.init_ui()
         self.setMinimumSize(0, 0)
@@ -221,7 +222,9 @@ class CombinedCreditOverviewDialog(QDialog):
         self.worker.finished.connect(self.on_data_loaded)
         self.worker.error.connect(self.on_error)
         self.worker.finished.connect(self.thread.quit)
+        self.worker.error.connect(self.thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.error.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
         self.thread.start()
 
@@ -229,6 +232,12 @@ class CombinedCreditOverviewDialog(QDialog):
         return self.service.get_combined_credit_overview()
 
     def on_data_loaded(self, result):
+        if self._closed:
+            return
+        try:
+            self.is_loading
+        except RuntimeError:
+            return
         self.is_loading = False
         # self.summary = result["summary"]
         self.combined_data = result["rows"]
@@ -239,6 +248,12 @@ class CombinedCreditOverviewDialog(QDialog):
         self.table.show()
 
     def on_error(self, error):
+        if self._closed:
+            return
+        try:
+            self.loading_label
+        except RuntimeError:
+            return
         self.is_loading = False
         self.loading_label.hide()
         self.table.show()
@@ -433,10 +448,10 @@ class CombinedCreditOverviewDialog(QDialog):
         dialog.show()
 
     def closeEvent(self, event):
+        self._closed = True
         try:
             if self.thread is not None and self.thread.isRunning():
                 self.thread.quit()
-                self.thread.wait(1000)
         except RuntimeError:
             pass
         event.accept()

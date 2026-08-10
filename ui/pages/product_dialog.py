@@ -8,7 +8,7 @@ import logging
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QScrollArea,
     QFrame, QFormLayout, QLineEdit, QSpinBox, QComboBox, QTextEdit,
-    QDoubleSpinBox, QDateEdit, QLabel, QMessageBox, QGroupBox,
+    QDoubleSpinBox, QDateEdit, QLabel, QMessageBox, QGroupBox, QCheckBox,
     QSizePolicy, QTableWidget, QHeaderView, QTableWidgetItem, QApplication
 )
 from PySide6.QtCore import Qt, QDate, Signal, QTimer, QLocale
@@ -1119,8 +1119,8 @@ class ProductFormDialog(QDialog):
         right_layout.addWidget(product_section)
         right_layout.addStretch()
 
-        two_column_layout.addWidget(left_column, 1)
-        two_column_layout.addWidget(right_column, 1)
+        two_column_layout.addWidget(left_column, 3)
+        two_column_layout.addWidget(right_column, 2)
 
         form_layout.addWidget(two_column_widget)
         form_layout.addStretch()
@@ -1176,6 +1176,25 @@ class ProductFormDialog(QDialog):
         """)
         self.add_product_btn.clicked.connect(self.add_current_product)
 
+        self.send_notifications_checkbox = QCheckBox("Send Notifications")
+        self.send_notifications_checkbox.setChecked(True)
+        self.send_notifications_checkbox.setToolTip("Uncheck to prevent sending order notification to supplier and store team")
+        self.send_notifications_checkbox.setStyleSheet("""
+            QCheckBox {
+                padding: 4px 8px;
+                border-radius: 4px;
+                background-color: #ecf0f1;
+                color: #2c3e50;
+            }
+            QCheckBox:checked {
+                background-color: #27ae60;
+                color: white;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+            }
+        """)
         self.finish_btn = QPushButton("💾 Finish Purchase")
         self.finish_btn.setMinimumSize(200, 50)
         self.finish_btn.setFont(btn_font)
@@ -1195,8 +1214,10 @@ class ProductFormDialog(QDialog):
         self.finish_btn.clicked.connect(self.finish_purchase)
 
         button_layout.addStretch()
+        button_layout.addWidget(self.send_notifications_checkbox)   # new
         button_layout.addWidget(self.cancel_btn)
         button_layout.addWidget(self.add_product_btn)
+       
         button_layout.addWidget(self.finish_btn)
 
         main_layout.addWidget(button_widget)
@@ -1586,8 +1607,9 @@ class ProductFormDialog(QDialog):
                     purchase_id=purchase.id,
                     notification_type='purchase_notification'
                 )
-                supplier_id = purchase_data["supplier_id"]
-                notify_supplier_purchase_sync(supplier_id, purchase_id=purchase.id)
+                if self.send_notifications_checkbox.isChecked():
+                    supplier_id = purchase_data["supplier_id"]
+                    notify_supplier_purchase_sync(supplier_id, purchase_id=purchase.id)
                 self.product_saved.emit(purchase)
                 self.accept()
             else:
@@ -1668,6 +1690,7 @@ class ProductFormDialog(QDialog):
             self.purchase_details_btn.hide()
             self.quantity_input.setEnabled(False)
             self.cost_input.setEnabled(False)
+            self.send_notifications_checkbox.setVisible(False)
             self.table_section.hide()
             self.summary_row.hide()
             self.add_product_btn.hide()

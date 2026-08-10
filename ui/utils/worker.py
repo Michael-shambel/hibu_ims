@@ -18,5 +18,3 @@ class Worker(QObject):
         except Exception as e:
             traceback.print_exc()
             self.error.emit(str(e))
-        finally:
-            self.deleteLater()

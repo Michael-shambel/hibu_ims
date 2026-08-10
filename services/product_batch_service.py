@@ -15,7 +15,7 @@ from ui.components.ethiopian_date import EthiopianDateConverter
 import logging
 from typing import Optional
 from datetime import datetime, date
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, Session
 
 logger = logging.getLogger(__name__)
 
@@ -27,74 +27,84 @@ class ProductBatchService(BaseService[ProductBatch]):
         self.bank_transaction_service = BankTransactionService()
         self.ledger_service = SupplierCreditLedgerService()
 
-    def delete_batch_cascade(self, batch_id: int) -> bool:
-        """Soft delete a batch and its transactions, then update product totals."""
-        with get_session() as session:
-            try:
-                batch = session.query(ProductBatch).filter(
-                    ProductBatch.id == batch_id,
-                    ProductBatch.is_deleted == False
-                ).first()
-                if not batch:
-                    return False
+    def delete_batch_cascade(self, batch_id: int, session: Session = None) -> bool:
+        """
+        Soft delete a batch and its transactions.
+        If session is provided, use it (for atomic operations).
+        Otherwise, create a new session.
+        """
+        if session is None:
+            with get_session() as sess:
+                return self._delete_batch_cascade_in_session(sess, batch_id)
+        else:
+            return self._delete_batch_cascade_in_session(session, batch_id)
 
-                purchase_id = batch.purchase_id
-                product = batch.product
-                dozen = product.dozen if product else 1
-                value = batch.quantity * batch.cost_price * dozen
-
-                # Human-readable details
-                product_name = product.name if product else "Unknown"
-                purchase = session.query(Purchase).get(purchase_id) if purchase_id else None
-                if purchase and purchase.purchase_date:
-                    eth_year, eth_month, eth_day = EthiopianDateConverter.to_ethiopian(purchase.purchase_date)
-                    purchase_date_str = f"{eth_day:02d}/{eth_month:02d}/{eth_year:04d}"
-                else:
-                    purchase_date_str = "N/A"
-
-                # ✅ Ledger: Reverse the entire batch value if it's part of a purchase
-                if purchase and purchase.supplier_id:
-                    self.ledger_service.add_entry(
-                        session=session,
-                        supplier_id=purchase.supplier_id,
-                        entry_date=date.today(),
-                        entry_type='adjustment',
-                        description=f"Deleted batch: Product \"{product_name}\" "
-                                    f"(Purchase {purchase_date_str}) value ${value:,.2f}",
-                        debit=0.0,
-                        credit=value,
-                        purchase_id=purchase.id,
-                        batch_id=batch.id
-                    )
-
-                batch.is_deleted = True
-
-                session.query(BatchTransaction).filter(
-                    BatchTransaction.batch_id == batch_id,
-                    BatchTransaction.is_deleted == False
-                ).update({"is_deleted": True}, synchronize_session=False)
-
-                session.flush()
-
-                if product:
-                    product.update_totals()
-
-                if purchase_id:
-                    self.purchase_service.recalc_purchase_total(purchase_id, session)
-                    remaining = session.query(ProductBatch).filter(
-                        ProductBatch.purchase_id == purchase_id,
-                        ProductBatch.is_deleted == False
-                    ).count()
-                    if remaining == 0:
-                        self.purchase_service.delete_purchase_cascade_in_session(session, purchase_id)
-
-                session.commit()
-                return True
-
-            except Exception as e:
-                session.rollback()
-                logger.error(f"Error deleting batch {batch_id}: {e}")
+    def _delete_batch_cascade_in_session(self, session: Session, batch_id: int) -> bool:
+        """Internal method – assumes a session is already open."""
+        try:
+            batch = session.query(ProductBatch).filter(
+                ProductBatch.id == batch_id,
+                ProductBatch.is_deleted == False
+            ).first()
+            if not batch:
                 return False
+
+            purchase_id = batch.purchase_id
+            product = batch.product
+            dozen = product.dozen if product else 1
+            value = batch.quantity * batch.cost_price * dozen
+
+            # Human-readable details
+            product_name = product.name if product else "Unknown"
+            purchase = session.query(Purchase).get(purchase_id) if purchase_id else None
+            if purchase and purchase.purchase_date:
+                eth_year, eth_month, eth_day = EthiopianDateConverter.to_ethiopian(purchase.purchase_date)
+                purchase_date_str = f"{eth_day:02d}/{eth_month:02d}/{eth_year:04d}"
+            else:
+                purchase_date_str = "N/A"
+
+            # ✅ Ledger: Reverse the entire batch value if it's part of a purchase
+            if purchase and purchase.supplier_id:
+                self.ledger_service.add_entry(
+                    session=session,
+                    supplier_id=purchase.supplier_id,
+                    entry_date=date.today(),
+                    entry_type='adjustment',
+                    description=f"Deleted batch: Product \"{product_name}\" "
+                                f"(Purchase {purchase_date_str}) value ${value:,.2f}",
+                    debit=0.0,
+                    credit=value,
+                    purchase_id=purchase.id,
+                    batch_id=batch.id
+                )
+
+            batch.is_deleted = True
+
+            session.query(BatchTransaction).filter(
+                BatchTransaction.batch_id == batch_id,
+                BatchTransaction.is_deleted == False
+            ).update({"is_deleted": True}, synchronize_session=False)
+
+            session.flush()
+
+            if product:
+                product.update_totals()
+
+            if purchase_id:
+                self.purchase_service.recalc_purchase_total(purchase_id, session)
+                remaining = session.query(ProductBatch).filter(
+                    ProductBatch.purchase_id == purchase_id,
+                    ProductBatch.is_deleted == False
+                ).count()
+                if remaining == 0:
+                    self.purchase_service.delete_purchase_cascade_in_session(session, purchase_id)
+
+            return True
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error deleting batch {batch_id}: {e}")
+            return False
 
     def count_by_product(self, product_id: int) -> int:
         """Return the number of non-deleted batches for a given product."""

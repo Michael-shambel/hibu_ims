@@ -289,7 +289,7 @@ def start_scheduler(bot_token: str):
     # Outbox retry worker — every 10 seconds
     scheduler.add_job(
         _safe_job(process_pending_notifications),
-        trigger=IntervalTrigger(seconds=10),
+        trigger=IntervalTrigger(seconds=20),
         id='process_pending_notifications',
         replace_existing=True,
         misfire_grace_time=20,

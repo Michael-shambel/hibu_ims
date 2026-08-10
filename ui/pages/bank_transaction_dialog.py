@@ -282,11 +282,11 @@ class BankTransactionHistoryDialog(QDialog):
 
         success = self.account_service.reset_transaction_history(self.account_id, new_starting_balance)
         if success:
-            QMessageBox.information(self, "Reset Complete",
-                                    f"Transaction history has been reset.\n"
-                                    f"Starting balance set to ${new_starting_balance:,.2f}.\n"
-                                    "All previous transactions are now hidden.\n"
-                                    "The current balance card reflects the new starting balance.")
+        #     QMessageBox.information(self, "Reset Complete",
+        #                             f"Transaction history has been reset.\n"
+        #                             f"Starting balance set to ${new_starting_balance:,.2f}.\n"
+        #                             "All previous transactions are now hidden.\n"
+        #                             "The current balance card reflects the new starting balance.")
             self.load_transactions()
         else:
             QMessageBox.critical(self, "Error", "Failed to reset transaction history.")

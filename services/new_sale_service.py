@@ -1,7 +1,9 @@
 #!/usr/bin/env python
+from ast import pattern
 import logging
+import difflib
 from unittest import result
-from sqlalchemy import func, case, or_
+from sqlalchemy import func, case, or_, and_, event
 from sqlalchemy.orm import joinedload
 from services.base_service import BaseService, get_session
 from services.new_sale_item_service import NewSaleItemService
@@ -478,19 +480,21 @@ class NewSaleService(BaseService[ProfessionalSale]):
     def get_credit_sales_summary(self) -> dict:
         """Return total credit amount, total paid, total unpaid."""
         with get_session() as session:
-            sales = session.query(ProfessionalSale).outerjoin(SalePaymentTerm).filter(
+            row = session.query(
+                func.coalesce(func.sum(SalePaymentTerm.total_amount), 0.0).label('total_credit'),
+                func.coalesce(func.sum(SalePaymentTerm.paid_amount), 0.0).label('total_paid'),
+            ).join(
+                ProfessionalSale, ProfessionalSale.id == SalePaymentTerm.sale_id
+            ).filter(
                 ProfessionalSale.is_deleted == False,
-                (
-                    (ProfessionalSale.is_credit_sale == True) |
-                    (SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]))
+                SalePaymentTerm.is_deleted == False,
+                or_(
+                    ProfessionalSale.is_credit_sale == True,
+                    SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL])
                 )
-            ).distinct().all()
-            total_credit = 0.0
-            total_paid = 0.0
-            for sale in sales:
-                total_credit += sale.total_amount
-                for pt in sale.payment_terms:
-                    total_paid += pt.paid_amount
+            ).one()
+            total_credit = float(row.total_credit or 0.0)
+            total_paid = float(row.total_paid or 0.0)
             return {
                 'total_credit_amount': total_credit,
                 'total_paid': total_paid,
@@ -804,94 +808,107 @@ class NewSaleService(BaseService[ProfessionalSale]):
         
         return None
     
-    def get_credit_sales_by_customer(self) -> list:
+    def get_credit_sales_by_customer(self, outstanding_only: bool = False) -> list:
         """
         Return customers with aggregate credit sales data.
-        Includes ALL credit sales, even fully paid ones.
+        When outstanding_only=True, only customers with a remaining balance are returned
+        (used by combined credit overview for faster loading).
         """
-        from models.sale_payment_term import SalePaymentTerm, PaymentStatusEnum
-        from sqlalchemy import or_, func
-        from sqlalchemy.orm import joinedload
-        from datetime import date
+        from datetime import date as date_cls
 
         with get_session() as session:
-            # Include all credit sales (remaining may be 0)
-            sales = session.query(ProfessionalSale).options(
-                joinedload(ProfessionalSale.customer),
-                joinedload(ProfessionalSale.payment_terms)
+            query = session.query(
+                ProfessionalSale.customer_id,
+                Customer.name.label('customer_name'),
+                Customer.phone.label('customer_phone'),
+                func.sum(SalePaymentTerm.total_amount).label('total_amount'),
+                func.sum(SalePaymentTerm.paid_amount).label('paid_amount'),
+                func.sum(SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount).label('remaining'),
+                func.min(SalePaymentTerm.due_date).label('earliest_due_date'),
+                func.max(
+                    case(
+                        (
+                            and_(
+                                SalePaymentTerm.due_date == func.date(ProfessionalSale.created_at),
+                                SalePaymentTerm.due_date == date_cls.today(),
+                                (SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount) > 0
+                            ),
+                            1
+                        ),
+                        else_=0
+                    )
+                ).label('has_short_term'),
+            ).join(
+                SalePaymentTerm, ProfessionalSale.id == SalePaymentTerm.sale_id
+            ).join(
+                Customer, ProfessionalSale.customer_id == Customer.id
+            ).filter(
+                ProfessionalSale.is_deleted == False,
+                SalePaymentTerm.is_deleted == False,
+                Customer.is_deleted == False,
+                or_(
+                    ProfessionalSale.is_credit_sale == True,
+                    SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL])
+                )
+            ).group_by(
+                ProfessionalSale.customer_id,
+                Customer.name,
+                Customer.phone,
+            )
+
+            if outstanding_only:
+                query = query.having(
+                    func.sum(SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount) > 0
+                )
+
+            rows = query.all()
+            if not rows:
+                return []
+
+            customer_ids = [row.customer_id for row in rows]
+            sale_id_rows = session.query(
+                ProfessionalSale.customer_id,
+                ProfessionalSale.id,
             ).join(
                 SalePaymentTerm, ProfessionalSale.id == SalePaymentTerm.sale_id
             ).filter(
                 ProfessionalSale.is_deleted == False,
                 SalePaymentTerm.is_deleted == False,
+                ProfessionalSale.customer_id.in_(customer_ids),
                 or_(
                     ProfessionalSale.is_credit_sale == True,
-                    SalePaymentTerm.payment_status.in_(
-                        [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]
-                    )
-                )
+                    SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL])
+                ),
             ).distinct().all()
 
-            customer_data = {}
-            for sale in sales:
-                # Find the relevant payment term (CREDIT or PARTIAL)
-                term = None
-                for pt in sale.payment_terms:
-                    if pt.payment_status in [PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL]:
-                        term = pt
-                        break
-                if not term and sale.payment_terms:
-                    term = sale.payment_terms[0]
-                if not term:
-                    continue
+            sale_ids_by_customer: Dict[int, List[int]] = {}
+            for cust_id, sale_id in sale_id_rows:
+                sale_ids_by_customer.setdefault(cust_id, []).append(sale_id)
 
-                remaining_for_term = term.total_amount - term.paid_amount
-
-                cust_id = sale.customer_id
-                name = sale.customer.name if sale.customer else "N/A"
-                phone = sale.customer.phone if sale.customer else ""
-
-                if cust_id not in customer_data:
-                    customer_data[cust_id] = {
-                        'customer_id': cust_id,
-                        'customer_name': name,
-                        'customer_phone': phone,
-                        'total_amount': 0.0,
-                        'paid_amount': 0.0,
-                        'remaining': 0.0,
-                        'sale_ids': [],
-                        'payment_term_ids': [],
-                        'earliest_due_date': None,
-                        'has_short_term': False
-                    }
-
-                customer_data[cust_id]['total_amount'] += term.total_amount
-                customer_data[cust_id]['paid_amount'] += term.paid_amount
-                customer_data[cust_id]['remaining'] += remaining_for_term
-                customer_data[cust_id]['sale_ids'].append(sale.id)
-                customer_data[cust_id]['payment_term_ids'].append(term.id)
-
-                # Earliest due date and short‑term flag
-                if term.due_date:
-                    if (customer_data[cust_id]['earliest_due_date'] is None or
-                        term.due_date < customer_data[cust_id]['earliest_due_date']):
-                        customer_data[cust_id]['earliest_due_date'] = term.due_date
-
-                    sale_date = sale.created_at.date() if sale.created_at else None
-                    today = date.today()
-                    if (sale_date and term.due_date == sale_date and
-                        term.due_date == today and remaining_for_term > 0):
-                        customer_data[cust_id]['has_short_term'] = True
-
-            # Build result with statuses
-            result = list(customer_data.values())
-            for r in result:
-                if r['remaining'] == 0:
-                    r['status'] = 'Paid'
-                elif r['paid_amount'] > 0:
-                    r['status'] = 'Partial'
+            result = []
+            for row in rows:
+                remaining = float(row.remaining or 0.0)
+                paid = float(row.paid_amount or 0.0)
+                if remaining == 0:
+                    status = 'Paid'
+                elif paid > 0:
+                    status = 'Partial'
                 else:
-                    r['status'] = 'Unpaid'
+                    status = 'Unpaid'
+
+                result.append({
+                    'customer_id': row.customer_id,
+                    'customer_name': row.customer_name,
+                    'customer_phone': row.customer_phone or "",
+                    'total_amount': float(row.total_amount or 0.0),
+                    'paid_amount': paid,
+                    'remaining': remaining,
+                    'status': status,
+                    'sale_ids': sale_ids_by_customer.get(row.customer_id, []),
+                    'payment_term_ids': [],
+                    'earliest_due_date': row.earliest_due_date,
+                    'has_short_term': bool(row.has_short_term),
+                })
 
             result.sort(key=lambda x: x['customer_name'])
             return result
@@ -1128,12 +1145,113 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 .filter(ProfessionalSale.is_deleted == False) \
                 .count()
 
+    def _fuzzy_pattern(self, term: str) -> str:
+        """Convert 'abc' into '%a%b%c%' for subsequence matching."""
+        return '%' + '%'.join(term.strip()) + '%'
+
+    # ---- Typo-tolerant fuzzy search ----
+    # Registered as a SQLite scalar function (FUZZY_MATCH) so it can be used
+    # directly inside WHERE clauses without pulling rows into Python first.
+    # Only invoked as a fallback when the fast, indexed exact/substring
+    # search returns zero results, so it doesn't slow down normal searches.
+    _fuzzy_registered_engines = set()
+
+    @staticmethod
+    def _fuzzy_token_score(query_token: str, text_token: str, threshold: float = 0.6) -> float:
+        """How well one query word matches one text word, from 0 to 1."""
+        if query_token == text_token:
+            return 1.0
+        if query_token in text_token or text_token in query_token:
+            shorter = min(len(query_token), len(text_token))
+            longer = max(len(query_token), len(text_token))
+            return 0.9 * (shorter / longer)
+        if len(query_token) >= 3 and len(text_token) >= 3:
+            ratio = difflib.SequenceMatcher(None, query_token, text_token).ratio()
+            return ratio if ratio >= threshold else 0.0
+        return 0.0
+
+    @classmethod
+    def _field_relevance(cls, text_val, query_val) -> Tuple[bool, float]:
+        """Check one field (e.g. a product name) against the full search
+        text. Returns (matched, score) where matched requires every word
+        in query_val to match somewhere in text_val, and score (0-1)
+        reflects how close the overall match is — used to rank results."""
+        if not text_val or not query_val:
+            return False, 0.0
+        text_tokens = str(text_val).lower().split()
+        query_tokens = str(query_val).lower().split()
+        token_scores = []
+        for qt in query_tokens:
+            best = max(
+                (cls._fuzzy_token_score(qt, tt) for tt in text_tokens),
+                default=0.0,
+            )
+            if best <= 0.0:
+                return False, 0.0
+            token_scores.append(best)
+        return True, sum(token_scores) / len(token_scores)
+
+    @classmethod
+    def _fuzzy_match_score(cls, text_val, query_val) -> int:
+        """SQLite scalar function wrapper: 1/0 for use in WHERE clauses."""
+        matched, _ = cls._field_relevance(text_val, query_val)
+        return 1 if matched else 0
+
+    def _ensure_fuzzy_function(self, session):
+        """Make sure FUZZY_MATCH() is available on this session's SQLite
+        connection (and any future connections from the same engine)."""
+        engine = session.get_bind()
+        if engine not in self._fuzzy_registered_engines:
+            @event.listens_for(engine, "connect")
+            def _register_fuzzy(dbapi_connection, connection_record):
+                dbapi_connection.create_function(
+                    "FUZZY_MATCH", 2, self._fuzzy_match_score
+                )
+            self._fuzzy_registered_engines.add(engine)
+        # The event above only fires for *new* connections; register on the
+        # current, already-open connection too so it works immediately.
+        try:
+            session.connection().connection.create_function(
+                "FUZZY_MATCH", 2, self._fuzzy_match_score
+            )
+        except Exception:
+            pass
+
+    def _sale_relevance(self, sale, stmt: str) -> float:
+        """Best relevance score (0-1) for a sale against the search text,
+        across its customer, item product names, and delivery name. An
+        exact numeric ID match always ranks highest."""
+        if stmt.isdigit() and sale.id == int(stmt):
+            return 1.0
+
+        best = 0.0
+        if sale.customer and sale.customer.name:
+            matched, score = self._field_relevance(sale.customer.name, stmt)
+            if matched:
+                best = max(best, score)
+
+        for item in sale.items:
+            batch = getattr(item, "batch", None)
+            product = getattr(batch, "product", None) if batch else None
+            if product and product.name:
+                matched, score = self._field_relevance(product.name, stmt)
+                if matched:
+                    best = max(best, score)
+
+        if sale.delivery_name:
+            matched, score = self._field_relevance(sale.delivery_name, stmt)
+            if matched:
+                best = max(best, score)
+
+        return best
+
     def get_all_sales_paginated(
         self,
         page: int = 1,
         page_size: int = 50,
         search: str = "",
-        filter_date: Optional[date] = None
+        filter_date: Optional[date] = None,
+        fuzzy: bool = False
     ) -> Tuple[List[ProfessionalSale], int]:
         """Return a page of sales and total count. Safe against invalid filter_date."""
         try:
@@ -1155,19 +1273,76 @@ class NewSaleService(BaseService[ProfessionalSale]):
                     conditions = []
                     if stmt.isdigit():
                         conditions.append(ProfessionalSale.id == int(stmt))
-                    conditions.append(
-                        ProfessionalSale.customer.has(Customer.name.ilike(f"%{stmt}%"))
-                    )
-                    conditions.append(
-                        ProfessionalSale.items.any(
-                            ProfessionalSaleItem.batch.has(
-                                ProductBatch.product.has(ProfessionalProduct.name.ilike(f"%{stmt}%"))
+
+                    if fuzzy:
+                        # Typo-tolerant match (e.g. "garum" finds "gerum").
+                        # Only reached as a fallback after an exact search
+                        # returns nothing, so the extra cost is acceptable.
+                        self._ensure_fuzzy_function(session)
+                        conditions.append(
+                            ProfessionalSale.customer.has(
+                                func.FUZZY_MATCH(Customer.name, stmt) == 1
                             )
                         )
-                    )
-                    conditions.append(
-                        ProfessionalSale.delivery_name.ilike(f"%{stmt}%")
-                    )
+                        conditions.append(
+                            ProfessionalSale.items.any(
+                                ProfessionalSaleItem.batch.has(
+                                    ProductBatch.product.has(
+                                        func.FUZZY_MATCH(ProfessionalProduct.name, stmt) == 1
+                                    )
+                                )
+                            )
+                        )
+                        conditions.append(
+                            func.FUZZY_MATCH(ProfessionalSale.delivery_name, stmt) == 1
+                        )
+
+                        filter_query = filter_query.filter(or_(*conditions))
+
+                        # Fuzzy matches vary in quality, so rank by
+                        # relevance instead of just recency. This means
+                        # pulling every match (not just one page) to score
+                        # and sort in Python, then slicing the page out —
+                        # acceptable since this path only runs on the rare
+                        # fallback search, not on every keystroke.
+                        matches = filter_query.options(
+                            joinedload(ProfessionalSale.customer),
+                            joinedload(ProfessionalSale.payment_terms),
+                            joinedload(ProfessionalSale.items)
+                                .joinedload(ProfessionalSaleItem.batch)
+                                .joinedload(ProductBatch.product),
+                        ).distinct().all()
+
+                        scored = [
+                            (self._sale_relevance(sale, stmt), sale.id, sale)
+                            for sale in matches
+                        ]
+                        scored.sort(key=lambda t: (-t[0], -t[1]))
+
+                        total = len(scored)
+                        start = (page - 1) * page_size
+                        page_sales = [
+                            s for _, _, s in scored[start:start + page_size]
+                        ]
+                        return page_sales, total
+
+                    else:
+                        # Fast, indexed exact/substring search (default path).
+                        pattern = f"%{stmt}%"
+                        conditions.append(
+                            ProfessionalSale.customer.has(Customer.name.ilike(pattern))
+                        )
+                        conditions.append(
+                            ProfessionalSale.items.any(
+                                ProfessionalSaleItem.batch.has(
+                                    ProductBatch.product.has(ProfessionalProduct.name.ilike(pattern))
+                                )
+                            )
+                        )
+                        conditions.append(
+                            ProfessionalSale.delivery_name.ilike(pattern)
+                        )
+
                     filter_query = filter_query.filter(or_(*conditions))
 
                 ordered_ids_query = filter_query.with_entities(
@@ -1752,7 +1927,8 @@ class NewSaleService(BaseService[ProfessionalSale]):
         page: int = 1,
         page_size: int = 50,
         short_term_only: bool = False,
-        search: str = ""
+        search: str = "",
+        fuzzy: bool = False
     ) -> Tuple[List[Dict], int]:
         from models.sale_payment_term import SalePaymentTerm, PaymentStatusEnum
         from models.customers import Customer
@@ -1818,13 +1994,16 @@ class NewSaleService(BaseService[ProfessionalSale]):
 
             # Apply search if provided
             if search:
-                search_lower = f"%{search.lower()}%"
+                if fuzzy:
+                    pattern = self._fuzzy_pattern(search)
+                else:
+                    pattern = f"%{search.lower()}%"
                 query = query.having(
                     or_(
-                        func.lower(Customer.name).like(search_lower),
-                        func.lower(cast(func.sum(SalePaymentTerm.total_amount), String)).like(search_lower),
-                        func.lower(cast(func.sum(SalePaymentTerm.paid_amount), String)).like(search_lower),
-                        func.lower(cast(func.sum(SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount), String)).like(search_lower)
+                        func.lower(Customer.name).like(pattern),
+                        func.lower(cast(func.sum(SalePaymentTerm.total_amount), String)).like(pattern),
+                        func.lower(cast(func.sum(SalePaymentTerm.paid_amount), String)).like(pattern),
+                        func.lower(cast(func.sum(SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount), String)).like(pattern)
                     )
                 )
 
@@ -1873,3 +2052,250 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 })
 
             return result, total
+
+    def get_product_performance_with_companions(
+        self,
+        start_date: date,
+        end_date: date,
+        low_margin_threshold: float = 4.0
+    ) -> List[Dict]:
+        """
+        Returns product performance data including:
+        - Companion margin (weighted)
+        - Stock age (days since oldest batch was created)
+        - Configurable low-margin threshold
+        """
+        from models.new_sale_item import ProfessionalSaleItem
+        from models.product_batch import ProductBatch
+        from models.new_product import ProfessionalProduct
+        from models.new_sales import ProfessionalSale
+        from sqlalchemy import func
+        from datetime import datetime, time, date as date_cls, timedelta
+
+        MIN_SALES_FOR_BCG = 3  # minimum distinct sales before trusting a Star/Cash Cow/Dog/Question Mark label
+
+        start_dt = datetime.combine(start_date, time.min)
+        end_dt = datetime.combine(end_date, time.max)
+        today = date_cls.today()
+
+        with get_session() as session:
+            # ---- 1. Basic product profitability ----
+            product_profit = session.query(
+                ProfessionalProduct.id.label('product_id'),
+                ProfessionalProduct.name.label('product_name'),
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen).label('total_qty'),
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProductBatch.cost_price).label('total_cost'),
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProfessionalSaleItem.unit_price).label('total_selling')
+            ).join(
+                ProductBatch, ProfessionalSaleItem.batch_id == ProductBatch.id
+            ).join(
+                ProfessionalProduct, ProductBatch.product_id == ProfessionalProduct.id
+            ).join(
+                ProfessionalSale, ProfessionalSaleItem.sale_id == ProfessionalSale.id
+            ).filter(
+                ProfessionalSale.created_at.between(start_dt, end_dt),
+                ProfessionalSale.is_deleted == False,
+                ProfessionalSaleItem.is_deleted == False,
+                ProductBatch.is_deleted == False,
+                ProfessionalProduct.is_deleted == False
+            ).group_by(
+                ProfessionalProduct.id, ProfessionalProduct.name
+            ).all()
+
+            product_map = {}
+            for row in product_profit:
+                profit = float(row.total_selling) - float(row.total_cost)
+                margin = (profit / float(row.total_selling) * 100) if row.total_selling else 0.0
+                product_map[row.product_id] = {
+                    'product_id': row.product_id,
+                    'product_name': row.product_name,
+                    'quantity': int(row.total_qty),
+                    'total_cost': float(row.total_cost),
+                    'total_selling': float(row.total_selling),
+                    'profit': profit,
+                    'margin': margin,
+                }
+
+            if not product_map:
+                return []
+
+            # ---- 2. Weighted companion margins ----
+            sale_items = session.query(
+                ProfessionalSaleItem.sale_id,
+                ProductBatch.product_id,
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProfessionalSaleItem.unit_price).label('sale_selling'),
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProductBatch.cost_price).label('sale_cost')
+            ).join(
+                ProductBatch, ProfessionalSaleItem.batch_id == ProductBatch.id
+            ).join(
+                ProfessionalSale, ProfessionalSaleItem.sale_id == ProfessionalSale.id
+            ).filter(
+                ProfessionalSale.created_at.between(start_dt, end_dt),
+                ProfessionalSale.is_deleted == False,
+                ProfessionalSaleItem.is_deleted == False,
+                ProductBatch.is_deleted == False
+            ).group_by(
+                ProfessionalSaleItem.sale_id,
+                ProductBatch.product_id
+            ).all()
+
+            sale_products = {}
+            sales_count_map = {}  # product_id -> number of distinct sales it appeared in this period
+            for row in sale_items:
+                sale_id = row.sale_id
+                if sale_id not in sale_products:
+                    sale_products[sale_id] = []
+                selling = float(row.sale_selling)
+                cost = float(row.sale_cost)
+                margin = (selling - cost) / selling * 100 if selling else 0.0
+                sale_products[sale_id].append({
+                    'product_id': row.product_id,
+                    'margin': margin,
+                    'selling': selling,
+                    'cost': cost,
+                })
+                sales_count_map[row.product_id] = sales_count_map.get(row.product_id, 0) + 1
+
+            product_companion_weighted_sum = {pid: 0.0 for pid in product_map.keys()}
+            product_companion_weight_total = {pid: 0.0 for pid in product_map.keys()}
+
+            for sale_id, items in sale_products.items():
+                for i, item in enumerate(items):
+                    other_margins = []
+                    other_sellings = []
+                    for j, other in enumerate(items):
+                        if j != i:
+                            other_margins.append(other['margin'])
+                            other_sellings.append(other['selling'])
+                    if other_margins:
+                        weighted_sum = sum(m * s for m, s in zip(other_margins, other_sellings))
+                        total_selling_others = sum(other_sellings)
+                        if total_selling_others > 0:
+                            weighted_avg = weighted_sum / total_selling_others
+                        else:
+                            weighted_avg = sum(other_margins) / len(other_margins)
+                        product_companion_weighted_sum[item['product_id']] += weighted_avg * total_selling_others
+                        product_companion_weight_total[item['product_id']] += total_selling_others
+
+            for pid in product_map.keys():
+                if product_companion_weight_total[pid] > 0:
+                    product_map[pid]['companion_margin'] = product_companion_weighted_sum[pid] / product_companion_weight_total[pid]
+                else:
+                    product_map[pid]['companion_margin'] = None
+
+            # ---- 3. Stock age (inventory holding) ----
+            oldest_batches = session.query(
+                ProductBatch.product_id,
+                func.min(ProductBatch.created_at).label('first_date')
+            ).filter(
+                ProductBatch.is_deleted == False,
+                ProductBatch.available_quantity > 0
+            ).group_by(ProductBatch.product_id).all()
+            oldest_map = {row.product_id: row.first_date.date() for row in oldest_batches}
+
+            for pid in product_map.keys():
+                first_date = oldest_map.get(pid)
+                if first_date:
+                    product_map[pid]['stock_age_days'] = (today - first_date).days
+                else:
+                    product_map[pid]['stock_age_days'] = None
+
+            # ---- 3b. Trend (profit change vs. the immediately preceding period of equal length) ----
+            period_length = end_date - start_date
+            prev_end_date = start_date - timedelta(days=1)
+            prev_start_date = prev_end_date - period_length
+            prev_start_dt = datetime.combine(prev_start_date, time.min)
+            prev_end_dt = datetime.combine(prev_end_date, time.max)
+
+            prev_profit_rows = session.query(
+                ProfessionalProduct.id.label('product_id'),
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProductBatch.cost_price).label('total_cost'),
+                func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProfessionalSaleItem.unit_price).label('total_selling')
+            ).join(
+                ProductBatch, ProfessionalSaleItem.batch_id == ProductBatch.id
+            ).join(
+                ProfessionalProduct, ProductBatch.product_id == ProfessionalProduct.id
+            ).join(
+                ProfessionalSale, ProfessionalSaleItem.sale_id == ProfessionalSale.id
+            ).filter(
+                ProfessionalSale.created_at.between(prev_start_dt, prev_end_dt),
+                ProfessionalSale.is_deleted == False,
+                ProfessionalSaleItem.is_deleted == False,
+                ProductBatch.is_deleted == False,
+                ProfessionalProduct.is_deleted == False
+            ).group_by(
+                ProfessionalProduct.id
+            ).all()
+
+            prev_profit_map = {
+                row.product_id: float(row.total_selling) - float(row.total_cost)
+                for row in prev_profit_rows
+            }
+
+            for pid in product_map.keys():
+                prev_profit = prev_profit_map.get(pid)
+                current_profit = product_map[pid]['profit']
+                if prev_profit is None:
+                    # Product had no sales in the prior period - a % change would be meaningless
+                    product_map[pid]['trend'] = None
+                elif prev_profit == 0:
+                    # Avoid divide-by-zero; only flag a trend if profit actually moved off zero
+                    product_map[pid]['trend'] = None if current_profit == 0 else 100.0
+                else:
+                    product_map[pid]['trend'] = (current_profit - prev_profit) / abs(prev_profit) * 100
+
+            # ---- 4. Classification (Role + Category) ----
+            all_margins = [p['margin'] for p in product_map.values() if p['margin'] is not None]
+            overall_avg_margin = sum(all_margins) / len(all_margins) if all_margins else 0.0
+
+            # BCG medians
+            margins_sorted = sorted([p['margin'] for p in product_map.values()])
+            quantities_sorted = sorted([p['quantity'] for p in product_map.values()])
+            median_margin = margins_sorted[len(margins_sorted)//2] if margins_sorted else 0.0
+            median_quantity = quantities_sorted[len(quantities_sorted)//2] if quantities_sorted else 0.0
+
+            total_profit = sum(p['profit'] for p in product_map.values())
+
+            for pid, data in product_map.items():
+                # Role (using dynamic threshold)
+                comp = data.get('companion_margin')
+                margin = data['margin']
+                if margin <= 0:
+                    if comp is not None and comp > overall_avg_margin:
+                        role = 'Loss Leader'
+                    else:
+                        role = 'Loss'
+                elif margin < low_margin_threshold:   # <--- DYNAMIC THRESHOLD
+                    if comp is not None and comp > overall_avg_margin:
+                        role = 'Breakeven Helper'
+                    else:
+                        role = 'Low Margin'
+                else:
+                    role = 'Profitable'
+                data['role'] = role
+
+                # BCG Category
+                sales_count = sales_count_map.get(pid, 0)
+                data['sales_count'] = sales_count
+                if margin <= 0:
+                    # A loss is a fact regardless of sample size - keep it, don't hide it
+                    category = 'Loss'
+                elif sales_count < MIN_SALES_FOR_BCG:
+                    # Too few transactions to trust a Star/Cash Cow/Dog/Question Mark label
+                    category = 'Insufficient Data'
+                elif margin > median_margin and data['quantity'] > median_quantity:
+                    category = 'Star'
+                elif margin <= median_margin and data['quantity'] > median_quantity:
+                    category = 'Cash Cow'
+                elif margin > median_margin and data['quantity'] <= median_quantity:
+                    category = 'Question Mark'
+                else:
+                    category = 'Dog'
+                data['category'] = category
+
+                # Derived metrics
+                data['roi'] = (data['profit'] / data['total_cost'] * 100) if data['total_cost'] > 0 else 0.0
+                data['contribution'] = (data['profit'] / total_profit * 100) if total_profit > 0 else 0.0
+                data['profit_per_unit'] = (data['profit'] / data['quantity']) if data['quantity'] else 0.0
+
+            return list(product_map.values())

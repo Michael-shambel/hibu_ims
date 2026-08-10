@@ -322,60 +322,42 @@ class NewProductService(BaseService[ProfessionalProduct]):
                 return None
     
     def delete_cascading(self, product_id: int) -> bool:
+        from services.product_batch_service import ProductBatchService
+        batch_service = ProductBatchService()
+
         with get_session() as session:
             try:
                 product = session.query(ProfessionalProduct).filter(
                     ProfessionalProduct.id == product_id,
                     ProfessionalProduct.is_deleted == False
                 ).first()
-                
                 if not product:
                     logger.warning(f"Product {product_id} not found or already deleted")
                     return False
-                
-                purchase_ids = [
-                    b.purchase_id for b in session.query(ProductBatch.purchase_id)
-                    .filter(
-                        ProductBatch.product_id == product_id,
-                        ProductBatch.is_deleted == False,
-                        ProductBatch.purchase_id.isnot(None)
-                    )
-                    .distinct()
-                    .all()
-                ]
-                
-                product.is_deleted = True
-                logger.info(f"Marked product {product_id} as deleted")
 
-                session.query(ProductBatch).filter(
+                # Get all non-deleted batches for this product
+                batches = session.query(ProductBatch).filter(
                     ProductBatch.product_id == product_id,
                     ProductBatch.is_deleted == False
-                ).update({"is_deleted": True}, synchronize_session=False)
+                ).all()
 
-                session.flush()
+                if not batches:
+                    product.is_deleted = True
+                    session.commit()
+                    return True
 
-                batch_ids = select(ProductBatch.id).where(
-                    ProductBatch.product_id == product_id,
-                    ProductBatch.is_deleted == True
-                )
-                session.query(BatchTransaction).filter(
-                    BatchTransaction.batch_id.in_(batch_ids),
-                    BatchTransaction.is_deleted == False
-                ).update({"is_deleted": True}, synchronize_session=False)
+                # Delete each batch using the shared session
+                for batch in batches:
+                    if not batch_service.delete_batch_cascade(batch.id, session=session):
+                        raise Exception(f"Failed to delete batch {batch.id}")
 
-                session.flush()
+                # Mark product as deleted (already done if last batch triggered deletion, but safe)
+                product.is_deleted = True
 
-
-                for pid in purchase_ids:
-                    self.purchase_service.recalc_purchase_total(pid, session)
-                    remaining = session.query(ProductBatch).filter(
-                        ProductBatch.purchase_id == pid,
-                        ProductBatch.is_deleted == False
-                    ).count()
-                    if remaining == 0:
-                        self.purchase_service.delete_purchase_cascade_in_session(session, pid)
                 session.commit()
+                logger.info(f"Product {product_id} and all associated records deleted")
                 return True
+
             except Exception as e:
                 session.rollback()
                 logger.exception(f"Failed to delete product {product_id}: {e}")

@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableWidget,
     QTableWidgetItem, QMessageBox, QFrame, QLineEdit, QApplication, QComboBox
 )
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QFont, QColor
 from services.new_sale_service import NewSaleService
 from ui.pages.sales_card_dialog import CustomerSalesListDialog
@@ -45,6 +45,16 @@ class CreditSalesOverviewDialog(QDialog):
         self.worker = None
         self._closed = False
 
+        self.search_version = 0
+        self._load_version = 0
+        self.fuzzy_mode = False
+        self._fuzzy_attempted = False
+
+        # Debounce timer for search to avoid starting too many threads
+        self.search_timer = QTimer()
+        self.search_timer.setSingleShot(True)
+        self.search_timer.timeout.connect(self._do_search)
+
         self.init_ui()
         # Maximise to screen
         self.setMinimumSize(0, 0)
@@ -61,6 +71,10 @@ class CreditSalesOverviewDialog(QDialog):
         # ---------- Search bar ----------
         search_layout = QHBoxLayout()
         search_layout.setContentsMargins(0, 15, 0, 15)
+        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.setFixedSize(120, 35)
+        refresh_btn.clicked.connect(self.refresh_data)
+        search_layout.addWidget(refresh_btn)
         search_label = QLabel("Search:")
         search_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         self.search_edit = QLineEdit()
@@ -127,6 +141,13 @@ class CreditSalesOverviewDialog(QDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         main_layout.addWidget(self.table, 1)
 
+        self.fuzzy_status_label = QLabel("")
+        self.fuzzy_status_label.setAlignment(Qt.AlignCenter)
+        self.fuzzy_status_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        self.fuzzy_status_label.setStyleSheet("color: #f39c12;")
+        self.fuzzy_status_label.hide()
+        main_layout.addWidget(self.fuzzy_status_label)
+
         # ---------- Pagination bar ----------
         pagination_layout = QHBoxLayout()
         pagination_layout.setContentsMargins(0, 10, 0, 10)
@@ -163,10 +184,35 @@ class CreditSalesOverviewDialog(QDialog):
         self.loading_label.hide()
         main_layout.addWidget(self.loading_label)
 
+    def refresh_data(self):
+        self.fuzzy_mode = False
+        self._fuzzy_attempted = False
+        self.load_data()
+
     def load_data(self):
         if self.is_loading:
             return
+
+        # Stop any existing thread
+        if self.thread is not None:
+            try:
+                if self.thread.isRunning():
+                    self.thread.quit()
+                    self.thread.wait(1000)
+            except RuntimeError:
+                pass
+            self.thread = None
+            self.worker = None
+
         self.is_loading = True
+
+        # # Stop any existing thread before starting a new one
+        # try:
+        #     if self.thread is not None and self.thread.isRunning():
+        #         self.thread.quit()
+        #         self.thread.wait(1000)  # Wait up to 1 second for thread to finish
+        # except RuntimeError:
+        #     self.thread = None
         self.loading_label.show()
         self.table.hide()
 
@@ -177,7 +223,9 @@ class CreditSalesOverviewDialog(QDialog):
         self.worker.finished.connect(self.on_data_loaded)
         self.worker.error.connect(self.on_error)
         self.worker.finished.connect(self.thread.quit)
+        self.worker.error.connect(self.thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.error.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
         self.thread.start()
 
@@ -187,30 +235,53 @@ class CreditSalesOverviewDialog(QDialog):
             page=self.current_page,
             page_size=self.page_size,
             short_term_only=self.filter_short_term_only,
-            search=self.search_text   # pass the search term
+            search=self.search_text,
+            fuzzy=self.fuzzy_mode
         )
         return summary, customers, total
 
     def on_data_loaded(self, result):
         if self._closed:
             return
-        self.is_loading = False
+
+        # Ignore stale results
+        if self._load_version != self.search_version:
+            self.is_loading = False
+            self.loading_label.hide()
+            self.table.show()
+            return
+
         summary, customers, total = result
 
+        # --- Auto-fallback fuzzy logic ---
+        if total == 0 and self.search_text and not self._fuzzy_attempted:
+            self.fuzzy_mode = True
+            self._fuzzy_attempted = True
+            self.is_loading = False
+            QTimer.singleShot(0, self.load_data)  # deferred
+            return
+
+        # Normal processing
         self.summary = summary
         self.total_customers = total
         self.total_pages = (total + self.page_size - 1) // self.page_size if total > 0 else 1
 
-        # Update pagination controls
         self.prev_btn.setEnabled(self.current_page > 1)
         self.next_btn.setEnabled(self.current_page < self.total_pages)
         self.page_label.setText(f"Page {self.current_page} of {self.total_pages} ({total} customers)")
 
-        # Store data for this page (already sorted by service: unpaid first, then paid)
         self.customer_data = customers
-        self.filtered_data = customers.copy()   # search will work on current page
+        self.filtered_data = customers.copy()
 
         self.total_unpaid_label.setText(f"Total Unpaid: ${self.summary['total_unpaid']:,.2f}")
+
+        if self.fuzzy_mode and total > 0:
+            self.fuzzy_status_label.setText(
+                f"🔍 Showing fuzzy matches for '{self.search_text}'"
+            )
+            self.fuzzy_status_label.show()
+        else:
+            self.fuzzy_status_label.hide()
 
         self.populate_table()
         self.loading_label.hide()
@@ -219,6 +290,11 @@ class CreditSalesOverviewDialog(QDialog):
     def on_error(self, error):
         if self._closed:
             return
+        try:
+            self.loading_label
+        except RuntimeError:
+            return
+        self.is_loading = False
         self.loading_label.setText(f"Error loading data: {error}")
         QMessageBox.critical(self, "Error", f"Failed to load credit sales data:\n{error}")
         self.loading_label.hide()
@@ -389,13 +465,26 @@ class CreditSalesOverviewDialog(QDialog):
         return item
 
     def filter_table(self, text):
-        """
-        Trigger a server‑side search across all customers.
-        Resets to page 1 and reloads data with the search term.
-        """
-        self.search_text = text.strip()   # store search term (remove extra spaces)
-        self.current_page = 1             # go back to first page for search results
-        self.load_data()                  # reload data from database with search filter
+        self.search_text = text.strip()
+        self.current_page = 1
+        self.fuzzy_mode = False
+        self._fuzzy_attempted = False
+        self.search_version += 1
+        self.search_timer.start(300)
+
+    def _do_search(self):
+        """Actually perform the search (called after debounce delay)."""
+        # Stop any running thread first
+        try:
+            if self.thread is not None and self.thread.isRunning():
+                self.thread.quit()
+                self.thread.wait(1000)
+        except RuntimeError:
+            self.thread = None
+        # Reset loading state so load_data can proceed
+        self.is_loading = False
+        self._load_version = self.search_version
+        self.load_data()
 
     def view_customer_sales(self, cust):
         dialog = CustomerSalesListDialog(
@@ -433,10 +522,17 @@ class CreditSalesOverviewDialog(QDialog):
 
     def closeEvent(self, event):
         self._closed = True
+
+        if self.worker is not None:
+            try:
+                self.worker.finished.disconnect(self.on_data_loaded)
+                self.worker.error.disconnect(self.on_error)
+            except (RuntimeError, TypeError):
+                pass
+
         try:
             if hasattr(self, 'thread') and self.thread is not None and self.thread.isRunning():
                 self.thread.quit()
-                self.thread.wait(2000)
         except RuntimeError:
             pass
         event.accept()
