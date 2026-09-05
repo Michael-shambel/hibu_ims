@@ -59,6 +59,8 @@ Thumbs.db
 # Custom project-specific folders
 backups/
 assets/
+*.freebuff/
+*.agents/
 reports/generated/
 output/
 config.py
