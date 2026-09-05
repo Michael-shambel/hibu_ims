@@ -139,7 +139,7 @@ class ProductManager(QWidget):
                 background-color: #219a52;
             }
         """)
-        self.stock_in_btn.setVisible(False)
+        self.stock_in_btn.setVisible(True)
         self.credit_purchase_btn = QPushButton("📝 Credit Stock")
         self.credit_purchase_btn.setMinimumSize(120, 40)
         self.credit_purchase_btn.setEnabled(True)
@@ -160,7 +160,7 @@ class ProductManager(QWidget):
                 color: #7f8c8d;
             }
         """)
-        self.credit_purchase_btn.setVisible(False)
+        self.credit_purchase_btn.setVisible(True)
 
         # Add to toolbar layout (after add_batch_btn)
         toolbar_layout.addWidget(self.stock_in_btn)

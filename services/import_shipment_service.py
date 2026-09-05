@@ -428,6 +428,9 @@ class ImportShipmentService(BaseService):
 
 
     def stock_in(self, shipment_id: int, mapping: dict) -> Purchase:
+        from services.untils import normalize_string
+        from models.new_product import ProfessionalProduct
+
         with get_session() as session:
             shipment = session.query(ImportShipment).filter(
                 ImportShipment.id == shipment_id,
@@ -457,6 +460,19 @@ class ImportShipmentService(BaseService):
                 name = map_data['name']
                 unit = map_data['unit']
                 use_market_price = map_data.get('use_market_price', False)
+
+                # ---- New logic: if same name & unit but different dozen, modify name ----
+                norm_name = normalize_string(name)
+                norm_unit = normalize_string(unit)
+                existing_product = session.query(ProfessionalProduct).filter(
+                    ProfessionalProduct.normalized_name == norm_name,
+                    ProfessionalProduct.normalized_unit == norm_unit,
+                    ProfessionalProduct.is_deleted == False
+                ).first()
+                if existing_product and existing_product.dozen != sp.qty_per_carton:
+                    # Different dozen: append the dozen value to the product name
+                    name = f"{name} ({sp.qty_per_carton} pcs/ctn)"
+                # ----------------------------------------------------------------------
 
                 if use_market_price and sp.market_price:
                     selling_price = sp.market_price
@@ -492,7 +508,6 @@ class ImportShipmentService(BaseService):
                 'from_shipment': True,   # prevents double deduction
             }
 
-            # Create the purchase (this commits inside its own session)
             product_service = NewProductService()
             purchase = product_service.create(purchase_data)
             if not purchase:

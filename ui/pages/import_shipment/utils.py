@@ -57,7 +57,7 @@ class UtilsMixin:
             name_item = self.landed_table.item(row, 0)
             if name_item:
                 product_name = name_item.text().strip()
-                market_item = self.landed_table.item(row, 9)  # column 9 = Market Price
+                market_item = self.landed_table.item(row, 10)  # column 10 = Market Price
                 if market_item:
                     try:
                         price = float(market_item.text().replace(',', ''))

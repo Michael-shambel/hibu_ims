@@ -216,8 +216,9 @@ class AddCostItemDialog(QDialog):
         from ui.components.universal_crud_dialog import UniversalCRUDDialog
         from services.cost_type_service import CostTypeService
         dialog = UniversalCRUDDialog('cost_type', CostTypeService, self)
-        if dialog.exec():
-            self.load_cost_types()
+        dialog.exec()  # block until the dialog is closed
+        # Always reload after the dialog closes – new types will appear
+        self.load_cost_types()
 
     def get_data(self):
         paid = self.paid_checkbox.isChecked()

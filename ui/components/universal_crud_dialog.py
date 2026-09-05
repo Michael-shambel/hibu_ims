@@ -5,7 +5,7 @@ FIXED VERSION with proper data loading
 """
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTextEdit,
-    QPushButton, QTableWidget, QTableWidgetItem, QFormLayout, QHeaderView, 
+    QPushButton, QTableWidget, QTableWidgetItem, QFormLayout, QHeaderView,
     QMessageBox, QComboBox, QAbstractItemView, QDoubleSpinBox, QCheckBox
 )
 from PySide6.QtCore import Qt
@@ -16,7 +16,7 @@ class UniversalCRUDDialog(QDialog):
     Universal dialog that handles ALL simple CRUD operations
     Replaces: CustomerDialog, SupplierDialog, CategoryDialog, SalespersonDialog
     """
-    
+
     # CONFIGURATION FOR ALL ENTITY TYPES
     CONFIGS = {
         'customer': {
@@ -29,10 +29,10 @@ class UniversalCRUDDialog(QDialog):
                 {'name': 'tin_num', 'label': 'TIN Number*', 'type': 'text', 'required': True},
                 {'name': 'phone', 'label': 'Phone Number*', 'type': 'text', 'required': True, 'validation': 'phone'},
                 {'name': 'email', 'label': 'Email', 'type': 'text'},
-                {'name': 'state', 'label': 'State*', 'type': 'combo', 'required': True, 
+                {'name': 'state', 'label': 'State*', 'type': 'combo', 'required': True,
                  'options': [
                     "Addis Ababa", "Afar Region", "Amhara Region", "Benishangul-Gumuz Region",
-                    "Dire Dawa", "Gambela Region", "Harari Region", "Oromia Region", 
+                    "Dire Dawa", "Gambela Region", "Harari Region", "Oromia Region",
                     "Sidama Region", "Somali Region", "SNNPR", "Tigray Region", "South West Ethiopia"
                  ]},
                 {'name': 'sub_city', 'label': 'Sub-City', 'type': 'text'},
@@ -47,15 +47,12 @@ class UniversalCRUDDialog(QDialog):
             'id_column': 0,
             'fields': [
                 {'name': 'supplier_name', 'label': 'Supplier Name*', 'type': 'text', 'required': True},
-                # {'name': 'contact_name', 'label': 'Contact Name', 'type': 'text'},
                 {'name': 'contact_phone', 'label': 'Contact Phone', 'type': 'text'},
                 {'name': 'additional_chat_ids', 'label': 'Additional Chat IDs (comma sep.)', 'type': 'text'},
-                # {'name': 'email', 'label': 'Email', 'type': 'text'},
-                # {'name': 'address', 'label': 'Address', 'type': 'textarea'}
             ]
         },
         'category': {
-            'title': 'Manage Categories', 
+            'title': 'Manage Categories',
             'service_class': None,  # Will be injected
             'columns': ['ID', 'Name', 'Description'],
             'id_column': 0,
@@ -73,7 +70,7 @@ class UniversalCRUDDialog(QDialog):
                 {'name': 'full_name', 'label': 'Full Name*', 'type': 'text', 'required': True},
                 {'name': 'phone', 'label': 'Phone*', 'type': 'text', 'required': True, 'validation': 'phone'},
                 {'name': 'email', 'label': 'Email', 'type': 'text'},
-                {'name': 'bank', 'label': 'Bank', 'type': 'combo', 
+                {'name': 'bank', 'label': 'Bank', 'type': 'combo',
                  'options': [
                     "Abay Bank", "Addis Bank", "Ahadu Bank", "Amhara Bank", "Awash Bank",
                     "Bank of Abyssinia", "Berhan Bank", "Bunna Bank", "CBE", "Cooprative Bank of Oromia",
@@ -92,10 +89,11 @@ class UniversalCRUDDialog(QDialog):
             'service_class': None,  # Will be injected
             'columns': ['ID', 'Name', 'Description', 'Active'],
             'id_column': 0,
+            # ★ REMOVED the 'is_active' field – now always active
             'fields': [
                 {'name': 'name', 'label': 'Cost Type Name*', 'type': 'text', 'required': True},
                 {'name': 'description', 'label': 'Description', 'type': 'text'},
-                {'name': 'is_active', 'label': 'Active', 'type': 'checkbox', 'default': True}
+                # is_active is no longer shown – it will be forced to True
             ]
         }
     }
@@ -108,7 +106,7 @@ class UniversalCRUDDialog(QDialog):
         self.service = service_class()
         self.current_entity = None
         self.field_widgets = {}
-        
+
         self.setWindowTitle(self.config['title'])
         self.setMinimumSize(600, 400)
         self.init_ui()
@@ -126,7 +124,7 @@ class UniversalCRUDDialog(QDialog):
         # BUTTONS
         button_layout = QHBoxLayout()
         self.add_btn = QPushButton("Add")
-        self.update_btn = QPushButton("Update") 
+        self.update_btn = QPushButton("Update")
         self.delete_btn = QPushButton("Delete")
         self.clear_btn = QPushButton("Clear")
 
@@ -164,7 +162,7 @@ class UniversalCRUDDialog(QDialog):
     def create_form_fields(self, form_layout):
         """Create form fields dynamically from config"""
         self.field_widgets = {}
-        
+
         for field_config in self.config['fields']:
             widget = self.create_field_widget(field_config)
             self.field_widgets[field_config['name']] = widget
@@ -173,7 +171,7 @@ class UniversalCRUDDialog(QDialog):
     def create_field_widget(self, field_config):
         """Create appropriate widget for field type"""
         field_type = field_config.get('type', 'text')
-        
+
         if field_type == 'text':
             widget = QLineEdit()
         elif field_type == 'textarea':
@@ -192,11 +190,13 @@ class UniversalCRUDDialog(QDialog):
             widget.setChecked(field_config.get('default', True))
         else:
             widget = QLineEdit()
-            
+
         return widget
 
     def get_form_data(self):
-        """Extract data from form fields"""
+        """Extract data from form fields.
+        ★ For cost_type, always force is_active=True.
+        """
         data = {}
         for field_name, widget in self.field_widgets.items():
             if isinstance(widget, QLineEdit):
@@ -209,6 +209,11 @@ class UniversalCRUDDialog(QDialog):
                 data[field_name] = widget.value()
             elif isinstance(widget, QCheckBox):
                 data[field_name] = widget.isChecked()
+
+        # ★ NEW: For cost_type, always set is_active to True
+        if self.entity_type == 'cost_type':
+            data['is_active'] = True
+
         return data
 
     def set_form_data(self, data):
@@ -217,7 +222,6 @@ class UniversalCRUDDialog(QDialog):
             if field_name in self.field_widgets:
                 widget = self.field_widgets[field_name]
                 if isinstance(widget, QLineEdit):
-                    # If the value is a list, join it with commas for display
                     if isinstance(value, list):
                         widget.setText(", ".join(str(v) for v in value))
                     else:
@@ -235,14 +239,14 @@ class UniversalCRUDDialog(QDialog):
     def validate_form(self):
         """Validate form data"""
         data = self.get_form_data()
-        
+
         # Required field validation
         for field_config in self.config['fields']:
             if field_config.get('required') and not data.get(field_config['name']):
-                QMessageBox.warning(self, "Validation Error", 
+                QMessageBox.warning(self, "Validation Error",
                                   f"{field_config['label']} is required.")
                 return False
-        
+
         # Phone validation
         if self.entity_type in ['customer', 'salesperson']:
             phone = data.get('phone', '')
@@ -250,7 +254,7 @@ class UniversalCRUDDialog(QDialog):
                 phone = phone.replace(" ", "")
                 pattern_local = r"^0(9\d{8})$"
                 pattern_international = r"^\+2519\d{8}$"
-                
+
                 if re.match(pattern_local, phone):
                     # Convert to international format
                     phone = "+251" + phone[1:]
@@ -259,7 +263,7 @@ class UniversalCRUDDialog(QDialog):
                     QMessageBox.warning(self, "Validation Error",
                                       "Invalid phone number.\nUse format +2519XXXXXXXX or 09XXXXXXXX.")
                     return False
-        
+
         return True
 
     def load_data(self):
@@ -273,20 +277,20 @@ class UniversalCRUDDialog(QDialog):
                 for col, column_name in enumerate(self.config['columns']):
                     attribute_name = self.get_entity_attribute(column_name)
                     value = self.get_entity_value(entity, attribute_name)
-                    
+
                     # Format special values
                     if column_name == 'Active':
                         value = 'Yes' if value else 'No'
                     elif column_name == 'Commission%' and value is not None:
                         value = f"{value}%"
-                    
+
                     item = QTableWidgetItem(str(value) if value is not None else "")
                     self.table.setItem(row, col, item)
-                
+
             # Hide ID column after populating
             if self.config.get('id_column') is not None:
                 self.table.setColumnHidden(self.config['id_column'], True)
-                
+
         except Exception as e:
             print(f"Error loading data: {e}")
             QMessageBox.critical(self, "Error", f"Failed to load data: {str(e)}")
@@ -304,7 +308,7 @@ class UniversalCRUDDialog(QDialog):
             'customer': {
                 'ID': 'id',
                 'Name': 'name',
-                'TIN': 'tin_num', 
+                'TIN': 'tin_num',
                 'Phone': 'phone',
                 'Email': 'email',
                 'State': 'state',
@@ -316,7 +320,7 @@ class UniversalCRUDDialog(QDialog):
                 'ID': 'id',
                 'Name': 'supplier_name',
                 'Contact': 'contact_name',
-                'Phone': 'contact_phone', 
+                'Phone': 'contact_phone',
                 'Email': 'email',
                 'Address': 'address'
             },
@@ -332,11 +336,11 @@ class UniversalCRUDDialog(QDialog):
                 'Email': 'email',
                 'Bank': 'bank',
                 'Account': 'account_number',
-                'Commission%': 'commission_rate', 
+                'Commission%': 'commission_rate',
                 'Active': 'is_active'
             }
         }
-        
+
         # Return the mapped attribute or default to lowercase
         return mapping.get(self.entity_type, {}).get(column_name, column_name.lower())
 
@@ -345,18 +349,18 @@ class UniversalCRUDDialog(QDialog):
         selected_row = self.table.currentRow()
         if selected_row < 0:
             return
-        
+
         try:
             # Get ID from the hidden ID column
             id_column = self.config.get('id_column', 0)
             entity_id_item = self.table.item(selected_row, id_column)
-            
+
             if not entity_id_item:
                 return
-                
+
             entity_id = int(entity_id_item.text())
             self.current_entity = self.service.get_by_id(entity_id)
-            
+
             if self.current_entity:
                 # Convert entity to dict for form population
                 entity_data = {}
@@ -364,12 +368,12 @@ class UniversalCRUDDialog(QDialog):
                     field_name = field_config['name']
                     attribute_name = self.get_form_to_entity_mapping(field_name)
                     entity_data[field_name] = self.get_entity_value(self.current_entity, attribute_name)
-                
+
                 self.set_form_data(entity_data)
                 self.delete_btn.setEnabled(True)
                 self.update_btn.setEnabled(True)
                 self.add_btn.setEnabled(False)
-                
+
         except Exception as e:
             print(f"Error selecting entity: {e}")
 
@@ -380,7 +384,7 @@ class UniversalCRUDDialog(QDialog):
                 'name': 'name',
                 'tin_num': 'tin_num',
                 'phone': 'phone',
-                'email': 'email', 
+                'email': 'email',
                 'state': 'state',
                 'sub_city': 'sub_city',
                 'wereda': 'wereda',
@@ -423,7 +427,7 @@ class UniversalCRUDDialog(QDialog):
                 widget.setValue(0.0)
             elif isinstance(widget, QCheckBox):
                 widget.setChecked(True)
-        
+
         self.table.clearSelection()
         self.delete_btn.setEnabled(False)
         self.update_btn.setEnabled(False)
@@ -433,7 +437,7 @@ class UniversalCRUDDialog(QDialog):
         """Add new entity"""
         if not self.validate_form():
             return
-        
+
         data = self.get_form_data()
         try:
             self.service.create(data)
@@ -447,7 +451,7 @@ class UniversalCRUDDialog(QDialog):
         """Update existing entity"""
         if not self.validate_form():
             return
-        
+
         data = self.get_form_data()
         try:
             self.service.update(self.current_entity.id, data)
@@ -462,9 +466,9 @@ class UniversalCRUDDialog(QDialog):
         if not self.current_entity:
             QMessageBox.warning(self, "Error", "No item selected for deletion.")
             return
-        
+
         entity_name = getattr(self.current_entity, self.get_form_to_entity_mapping(self.config['fields'][0]['name']), "this item")
-        
+
         reply = QMessageBox.question(
             self, "Confirm Delete",
             f"Are you sure you want to delete {entity_name}?",

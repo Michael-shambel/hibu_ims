@@ -703,12 +703,39 @@ class SalesManager(QWidget):
         """)
         add_expense_btn.clicked.connect(self.add_expense)
 
+        # Credit Mode Toggle (Live / Historical Credit)
+        self.mode_toggle = QCheckBox("🔴 Live Mode")
+        self.mode_toggle.setChecked(False)           # Unchecked = Live Mode (default)
+        self.mode_toggle.stateChanged.connect(self.on_mode_changed)
+        self.mode_toggle.setStyleSheet("""
+            QCheckBox {
+                spacing: 8px;
+                font-size: 12px;
+                font-weight: 600;
+                color: white;
+                padding: 4px 10px;
+                background-color: #2c3e50;
+                border-radius: 4px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 3px;
+                background-color: #2c3e50;
+                border: 2px solid #bdc3c7;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #f39c12;
+                border: 2px solid #e67e22;
+            }
+        """)
+
 
         title_layout.addWidget(self.same_day_credit_btn)
         title_layout.addWidget(all_sales_btn)
        
         title_layout.addWidget(add_expense_btn)
-        # title_layout.addWidget(self.mode_toggle)
+        title_layout.addWidget(self.mode_toggle)
         title_layout.addWidget(credit_sales_btn)
         title_layout.addWidget(credit_purchases_btn)
         title_layout.addWidget(self.transfer_btn)
@@ -1661,7 +1688,7 @@ class SalesManager(QWidget):
             self.credit_radio.setChecked(True)
             self.cash_radio.hide()
             self.payments_table.hide()
-            self.labour_expense_input.hide()
+            # self.labour_expense_input.hide()
             self.delivery_name.hide()
             # self.delivery_phone.hide()
             # self.delivery_place.hide()
@@ -1670,7 +1697,7 @@ class SalesManager(QWidget):
             self.cash_radio.show()
             self.cash_radio.setChecked(True)
             self.payments_table.show()
-            self.labour_expense_input.show()
+            # self.labour_expense_input.show()
             self.delivery_name.show()
             # self.delivery_phone.show()
             # self.delivery_place.show()

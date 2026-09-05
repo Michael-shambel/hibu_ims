@@ -300,6 +300,7 @@ class TaxSetupMixin:
                     except ValueError:
                         pass
             self.tax_summary_label.setText(f"Total Tax Payable: ETB {total_tax:,.2f}")
+            self.calculate_landed()
 
     def populate_tax_table(self):
         """Populate the tax table from the current shipment products."""

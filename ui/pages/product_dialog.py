@@ -1222,6 +1222,20 @@ class ProductFormDialog(QDialog):
 
         main_layout.addWidget(button_widget)
 
+    def setup_for_stock_in(self):
+        """Configure the dialog for Stock In mode (no supplier, no purchase)."""
+        self.purchase_details_btn.hide()          # Supplier not needed
+        self.table_section.show()
+        self.summary_row.show()
+        self.add_product_btn.show()
+        self.finish_btn.setText("💾 Save Stock In")
+        self.finish_btn.clicked.disconnect()
+        self.finish_btn.clicked.connect(self.save_stock_in_multiple)
+        self.product_lines = []
+        self.refresh_product_table()
+        self.update_total()
+        self.clear_product_fields()
+
     def open_purchase_details_dialog(self):
         dialog = PurchaseDetailsDialog(self.supplier_service, self.bank_account_service, self)
         if dialog.exec() == QDialog.Accepted:

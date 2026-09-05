@@ -17,6 +17,10 @@ class CalculationsMixin:
         Recalculate landed cost allocation and update:
         - Tab 2: allocation matrix
         - Tab 4: landed table, grand total, and pricing columns
+        # ---- ADD TAX PER PIECE TO TOTAL COST (normalized lookup) ----
+prod_key = prod["name"].strip().lower()
+tax_per_piece = self._tax_ps_values.get(prod_key, 0.0)
+total_tax = prod["total_quantity"] * tax_per_piece
         """
         # --- Step 1: Extract product data from the main table ---
         products = []
@@ -127,9 +131,21 @@ class CalculationsMixin:
             total_alloc = sum(allocs)
             fob_etb = prod["total_quantity"] * prod["unit_price_rmb"] * self.rate_spin.spin_box.value()
 
-            # ---- ADD TAX PER PIECE TO TOTAL COST ----
-            tax_per_piece = self._tax_ps_values.get(prod["name"], 0.0)
-            total_tax = prod["total_quantity"] * tax_per_piece
+            # Get total_tax directly from the tax table (column 11)
+            tax_row = self._find_tax_row_by_product(prod["name"])
+            if tax_row is not None:
+                tax_item = self.tax_table.item(tax_row, 11)
+                if tax_item:
+                    try:
+                        total_tax = float(tax_item.text().replace(',', ''))
+                    except ValueError:
+                        total_tax = 0.0
+                else:
+                    total_tax = 0.0
+            else:
+                total_tax = 0.0
+
+            tax_per_piece = total_tax / prod["total_quantity"] if prod["total_quantity"] > 0 else 0.0
 
             # Total Cost = FOB + Allocation + Total Tax
             total_cost_with_tax = fob_etb + total_alloc + total_tax

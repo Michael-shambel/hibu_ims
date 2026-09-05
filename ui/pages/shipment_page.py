@@ -399,7 +399,8 @@ class ImportShipmentPage(QWidget):
         for shipment in shipments:
             fob_total = self._shipment_fob(shipment)
             total_costs = sum(c.amount for c in shipment.costs if not c.is_deleted)
-            total_landed += fob_total + total_costs
+            total_tax = sum(p.total_tax_etb or 0.0 for p in shipment.products if not p.is_deleted)
+            total_landed += fob_total + total_costs + total_tax
             total_fob += fob_total
 
             status_value = shipment.status.value if shipment.status else "draft"
@@ -429,7 +430,8 @@ class ImportShipmentPage(QWidget):
         for row, shipment in enumerate(shipments):
             fob_total = self._shipment_fob(shipment)
             total_costs = sum(c.amount for c in shipment.costs if not c.is_deleted)
-            total_landed_shipment = fob_total + total_costs
+            total_tax = sum(p.total_tax_etb or 0.0 for p in shipment.products if not p.is_deleted)
+            total_landed_shipment = fob_total + total_costs + total_tax
 
             # ID
             id_item = QTableWidgetItem()

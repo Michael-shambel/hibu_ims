@@ -56,7 +56,7 @@ class Tab1SetupMixin:
 
         # Exchange Rate: ModernDoubleSpinBox (keep visible)
         self.rate_spin = ModernDoubleSpinBox("Exchange Rate", 0.01, 200.0, 4, "")
-        self.rate_spin.spin_box.setValue(17.85)
+        self.rate_spin.spin_box.setValue(24.00)
         self.rate_spin.spin_box.setPrefix("1 RMB = ")
         self.rate_spin.spin_box.setSuffix(" ETB")
         self.rate_spin.spin_box.valueChanged.connect(self.update_total_display)
@@ -432,6 +432,46 @@ class Tab1SetupMixin:
         self.update_total_display()
         self.calculate_landed()
 
+        # --- Propagate qty changes to the Custom Tax tab (Qty/doz) ---
+        if col in (3, 4):  # Cartons or Qty/Carton changed
+            self._sync_tax_qty_for_row(row)
+
+
+    def _sync_tax_qty_for_row(self, product_row):
+        """Update the Qty/doz in the tax table when cartons or qty/carton change."""
+        if not hasattr(self, 'tax_table') or not hasattr(self, '_find_tax_row_by_product'):
+            return
+
+        # Get product name
+        name_widget = self.product_table.cellWidget(product_row, 1)
+        product_name = name_widget.text().strip() if isinstance(name_widget, ModernLineEdit) else ""
+        if not product_name:
+            return
+
+        # Get new total qty from column 5
+        total_qty_item = self.product_table.item(product_row, 5)
+        if not total_qty_item:
+            return
+        try:
+            total_qty = float(total_qty_item.text().replace(',', ''))
+        except (ValueError, AttributeError):
+            return
+
+        qty_doz = total_qty / 12 if total_qty > 0 else 0.0
+
+        tax_row = self._find_tax_row_by_product(product_name)
+        if tax_row is None:
+            return
+
+        self.tax_table.blockSignals(True)
+        qty_doz_item = self.tax_table.item(tax_row, 3)
+        if qty_doz_item:
+            qty_doz_item.setText(f"{qty_doz:,.2f}")
+        self.tax_table.blockSignals(False)
+
+        # Recalculate tax for this row and update summary
+        self.recalculate_tax()
+
 
     def clear_all_rows(self):
         """Clear all product rows from the table after confirmation."""
@@ -509,8 +549,7 @@ class Tab1SetupMixin:
         self.update_table_summary()
         if hasattr(self, 'populate_tax_table'):
             self.populate_tax_table()
-            
-        QMessageBox.information(self, "Cleared", "All products have been removed.")
+            QMessageBox.information(self, "Cleared", "All products have been removed.")
 
 
     def update_table_summary(self):

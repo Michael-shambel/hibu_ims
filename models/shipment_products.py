@@ -9,7 +9,7 @@ class ShipmentProduct(BaseModel):
 
     shipment_id = Column(Integer, ForeignKey("import_shipments.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("professional_products.id"), nullable=True)
-    item_number = Column(String(100), nullable=True, index=True)
+    item_number = Column(String(100), nullable=True)
     product_name = Column(String(200), nullable=False)
     unit = Column(String(50), nullable=False)
 

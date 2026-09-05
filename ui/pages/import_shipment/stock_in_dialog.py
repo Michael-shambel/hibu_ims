@@ -18,6 +18,7 @@ class StockInMappingDialog(QDialog):
         self.setModal(True)
         self.mapping_result = None
         self.selected_product_ids = {}
+        self.checkboxes = []  # will hold references to all Use Market checkboxes
 
         # Reload shipment fresh from database
         service = ImportShipmentService()
@@ -42,6 +43,19 @@ class StockInMappingDialog(QDialog):
         header = QLabel("Map Shipment Products to Local Products")
         header.setFont(QFont("Segoe UI", 14, QFont.Bold))
         layout.addWidget(header)
+
+        # ---- Select / Deselect All button row ----
+        select_all_layout = QHBoxLayout()
+        select_all_btn = QPushButton("✅ Select All")
+        select_all_btn.setFixedSize(120, 30)
+        select_all_btn.clicked.connect(self.select_all_checkboxes)
+        deselect_all_btn = QPushButton("❌ Deselect All")
+        deselect_all_btn.setFixedSize(120, 30)
+        deselect_all_btn.clicked.connect(self.deselect_all_checkboxes)
+        select_all_layout.addWidget(select_all_btn)
+        select_all_layout.addWidget(deselect_all_btn)
+        select_all_layout.addStretch()
+        layout.addLayout(select_all_layout)
 
         self.table = QTableWidget()
         headers = ["#", "Item #", "Local Product Name", "Unit",
@@ -70,6 +84,7 @@ class StockInMappingDialog(QDialog):
         layout.addLayout(btn_layout)
 
     def populate_table(self):
+        self.checkboxes.clear()  # clear any previous references
         self.table.setRowCount(len(self.shipment.products))
         for row, sp in enumerate(self.shipment.products):
             if sp.is_deleted:
@@ -125,7 +140,7 @@ class StockInMappingDialog(QDialog):
             check_layout.setAlignment(Qt.AlignCenter)
 
             check = QCheckBox()
-            check.setChecked(True)   # <-- default checked
+            check.setChecked(True)   # default checked
             check.setStyleSheet("""
                 QCheckBox::indicator {
                     width: 18px;
@@ -144,6 +159,7 @@ class StockInMappingDialog(QDialog):
             """)
             check_layout.addWidget(check)
             self.table.setCellWidget(row, 8, check_widget)
+            self.checkboxes.append(check)   # store reference
 
     def on_product_selected(self, row, product_id):
         self.selected_product_ids[row] = product_id
@@ -199,3 +215,12 @@ class StockInMappingDialog(QDialog):
             self.accept()
         except ValueError as e:
             QMessageBox.warning(self, "Validation Error", str(e))
+
+    # ---- Select / Deselect All methods ----
+    def select_all_checkboxes(self):
+        for chk in self.checkboxes:
+            chk.setChecked(True)
+
+    def deselect_all_checkboxes(self):
+        for chk in self.checkboxes:
+            chk.setChecked(False)

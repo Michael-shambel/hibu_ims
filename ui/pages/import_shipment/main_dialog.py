@@ -340,7 +340,7 @@ class ImportShipmentDialog(
             )
 
     def save_shipment(self):
-        """Validate and save the shipment (create or update) including landed costs."""
+        """Validate and save the shipment (create or update) – stays open after save."""
         # ---- 1. Basic validation ----
         if not self.basic_info:
             QMessageBox.warning(self, "Validation", "Please set supplier and payment details first.")
@@ -417,8 +417,10 @@ class ImportShipmentDialog(
             else:
                 name_item = self.product_table.item(row, 1)
                 product_name = name_item.text().strip() if name_item else ""
+
+            # 🔥 FIX: Use item_number as fallback if product_name is empty
             if not product_name:
-                continue
+                product_name = item_number if item_number else f"Item {row+1}"
 
             unit_widget = self.product_table.cellWidget(row, 2)
             if isinstance(unit_widget, ModernLineEdit):
@@ -435,13 +437,17 @@ class ImportShipmentDialog(
                 continue
             if cartons <= 0 or qty_per <= 0 or unit_price_rmb <= 0:
                 continue
+
             tax_row = self._find_tax_row_by_product(product_name)
+            qty_doz = 0.0  # default
+
             if tax_row is not None:
                 qty_doz_item = self.tax_table.item(tax_row, 3)
                 try:
                     qty_doz = float(qty_doz_item.text().replace(',', '')) if qty_doz_item else 0.0
                 except ValueError:
                     qty_doz = 0.0
+
                 tax_usd_doz = get_tax_cell_value(tax_row, 4)
                 tax_total_price_usd = get_tax_cell_value(tax_row, 5)
                 tax_total_price_etb = get_tax_cell_value(tax_row, 6)
@@ -466,13 +472,13 @@ class ImportShipmentDialog(
             for r in range(self.landed_table.rowCount()):
                 name_item = self.landed_table.item(r, 0)
                 if name_item and name_item.text().strip() == product_name:
-                    market_item = self.landed_table.item(r, 9)
+                    market_item = self.landed_table.item(r, 10)
                     if market_item:
                         try:
                             market_price = float(market_item.text().replace(',', ''))
                         except ValueError:
                             pass
-                    target_item = self.landed_table.item(r, 8)
+                    target_item = self.landed_table.item(r, 9)
                     if target_item:
                         try:
                             target_price = float(target_item.text().replace(',', ''))
@@ -539,7 +545,13 @@ class ImportShipmentDialog(
 
             if shipment:
                 QMessageBox.information(self, "Success", msg)
-                self.accept()
+                # 🔥 NEW: Keep dialog open – reload shipment data
+                self.shipment_id = shipment.id
+                self.mode = "edit"
+                self.setWindowTitle(f"Edit Shipment #{shipment.id}")
+                self.save_btn.setText("💾 Update Draft")
+                # Reload all data from the freshly saved shipment
+                self.load_shipment(shipment.id)
             else:
                 QMessageBox.critical(self, "Error", "Failed to save shipment.")
         except Exception as e:
@@ -684,7 +696,7 @@ class ImportShipmentDialog(
                     product_name = name_item.text().strip()
                     if product_name in market_price_map:
                         price = market_price_map[product_name] or 0.0
-                        self.landed_table.setItem(row, 9, QTableWidgetItem(f"{price:,.2f}"))
+                        self.landed_table.setItem(row, 10, QTableWidgetItem(f"{price:,.2f}"))
 
             self.calculate_implied_margins()
             self.update_profit_summary()
@@ -703,6 +715,10 @@ class ImportShipmentDialog(
         self.populate_tax_table()
 
         # ---- Fill USD/Doz from saved data ----
+        # ---- Fill USD/Doz and Qty/doz from saved data ----
+        # Only restore values the user actually entered (> 0). Older drafts
+        # saved 0.0 when no custom value was set, which would otherwise wipe
+        # out the auto default (total qty / 12) that populate_tax_table filled.
         for product in shipment.products:
             if product.is_deleted:
                 continue
@@ -710,13 +726,13 @@ class ImportShipmentDialog(
             for row in range(self.tax_table.rowCount()):
                 name_item = self.tax_table.item(row, 1)
                 if name_item and name_item.text() == product.product_name:
-                    if product.usd_per_dozen is not None:
-                        self.tax_table.setItem(row, 4, QTableWidgetItem(f"{product.usd_per_dozen:.2f}"))
-                    break
-                if name_item and name_item.text() == product.product_name:
-                    if product.tax_qty_per_doz is not None:
+                    # Set Qty/doz (column 3) only if customised (> 0)
+                    if product.tax_qty_per_doz is not None and product.tax_qty_per_doz > 0:
                         self.tax_table.setItem(row, 3, QTableWidgetItem(f"{product.tax_qty_per_doz:.2f}"))
-                    break
+                    # Set USD/doz (column 4) only if customised (> 0)
+                    if product.usd_per_dozen is not None and product.usd_per_dozen > 0:
+                        self.tax_table.setItem(row, 4, QTableWidgetItem(f"{product.usd_per_dozen:.2f}"))
+                    break   # exit inner loop, move to next product
 
         # ---- Recalculate tax (fills all calculated columns) ----
         self.recalculate_tax()
