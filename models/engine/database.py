@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Production-ready SQLAlchemy SQLite Engine Setup
-- Error handling
-- Session management
-- Base and BaseModel separation
-"""
-
 import os
 import logging
 from typing import Generator
@@ -22,7 +15,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
-    """Robust database setup with base model"""
 
     def __init__(self):
         self.engine = self._create_engine()
@@ -31,23 +23,12 @@ class DatabaseManager:
 
     def _create_engine(self):
         try:
-            """
-            for integrating diffent type of drelational database
-            it will help to work with differnt environment
-            """
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             db_dir = os.path.join(project_root, "database")
             os.makedirs(db_dir, exist_ok=True)
-            # FIXED: Direct database path
             from utils import get_database_path
             db_path = get_database_path("inventory.db")
             db_url = os.getenv("DATABASE_URL", f"sqlite:///{db_path}")
-            """
-            create the interfaae b/n sqlalchemy and database
-                1)connection
-                2)translation sqlalchemt to db specific
-                3)execution
-            """
             engine = create_engine(
                 db_url,
                 echo=False,
@@ -71,24 +52,10 @@ class DatabaseManager:
         )
 
     def _create_base(self):
-        """
-        Define Base and BaseModel classes
-        we use _prefix indicates internal implementation 
-        MetaData sqlalchemy cataloge of databse which
-            1)track all tables, column
-        blueprint of your database structure
-        declarative_base():- createbase class for ORM models
-        """
         metadata = MetaData()
         Base = declarative_base(metadata=metadata)
 
         class BaseModel(Base):
-            """
-            __abstract__ makes this a template class
-            sqlalchemy wontcreate table for this class srve as parent for concretemodels
-            which prevent empty table creation
-            also makes the table not to reapeat
-            """
             __abstract__ = True
             
             id = Column(Integer, primary_key=True)

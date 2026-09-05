@@ -9,19 +9,6 @@ from models.engine.database import BaseModel
 from sqlalchemy.orm import relationship
 
 class Customer(BaseModel):
-    """
-    Customer model representing a customer in the database.
-    Attributes:
-        id (int): Unique identifier for the customer.
-        name (str): Name of the customer.
-        phone (str): Phone number of the customer.
-        email (str): Email address of the customer.
-        state (str): State where the customer resides.
-        Sub-city (str): Sub-city where the customer resides.
-        wereda (str): Wereda where the customer resides.
-        kebele (str): Kebele where the customer resides.
-        created_at (datetime): Timestamp when the customer was created.
-    """
     __tablename__ = 'customers'
 
     name = Column(String(100), nullable=False, index=True)

@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-Supplier Model
-Defines the Supplier model for the inventory management system.
-"""
 
 from sqlalchemy import Column, String, Text, BigInteger, JSON
 from sqlalchemy.orm import relationship
