@@ -682,6 +682,16 @@ class ImportShipmentPage(QWidget):
             self.service.approve_shipment(shipment_id)
             self.status_label.setText(f"✅ Shipment #{shipment_id} approved.")
             self.status_label.setStyleSheet("color: #2ecc71; font-size: 12px;")
+            # Queue the approval PDF (landed cost & margin / costs / customs tax)
+            # to the admin via Telegram – same outbox mechanism as the daily sales PDF.
+            try:
+                from telegrambot.bot import notify_shipment_approval_sync
+                notify_shipment_approval_sync(shipment_id)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "Failed to queue shipment approval report for #%s", shipment_id
+                )
             self.refresh()
         except Exception as e:
             QMessageBox.critical(self, "Approve Failed", str(e))
@@ -724,6 +734,58 @@ class ImportShipmentPage(QWidget):
             try:
                 purchase = self.service.stock_in(shipment_id, mapping)
                 QMessageBox.information(self, "Success", f"Stock‑in complete. Purchase #{purchase.id} created.")
+                self._notify_store_team_stock_in(shipment_id, purchase)
                 self.refresh()
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Stock‑in failed: {str(e)}")
+
+    def _notify_store_team_stock_in(self, shipment_id, purchase):
+        """Queue the stocked‑in item list to the store team (same as the add‑product dialog)."""
+        try:
+            from services.purchase_service import PurchaseService
+            from telegrambot.bot import notify_store_team_sync
+
+            purchase_with_items = PurchaseService().get_purchase_with_batches(purchase.id)
+            if not purchase_with_items or not purchase_with_items.batches:
+                return
+
+            def _fmt(value):
+                if float(value).is_integer():
+                    return str(int(value))
+                return f"{value:.1f}"
+
+            lines = []
+            for batch in purchase_with_items.batches:
+                product = batch.product
+                if not product:
+                    continue
+                qty = batch.quantity or 0
+                dozen = product.dozen or 1
+                pieces = qty * dozen
+
+                lines.append(
+                    f"• {product.name} – {_fmt(qty)} carton(s) × {_fmt(dozen)} pcs/ctn "
+                    f"({product.unit or ''}) = {_fmt(pieces)} pcs"
+                )
+
+            if not lines:
+                return
+
+            message = (
+                f"📦 <b>Stock In Completed – Shipment #{shipment_id}</b>\r\n"
+                f"───────────────────\r\n"
+                f"<b>Products Added:</b>\r\n"
+                + "\r\n".join(lines) + "\r\n"
+                f"───────────────────\r\n"
+                f"Total: {len(lines)} product(s)  |  Purchase #{purchase.id}"
+            )
+            notify_store_team_sync(
+                message,
+                purchase_id=purchase.id,
+                notification_type='stock_in_notification'
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "Failed to queue stock-in store-team notification for shipment #%s", shipment_id
+            )

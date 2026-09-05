@@ -121,6 +121,17 @@ def send_notification_to_admin_sync(message: str):
                        {'text': message, 'parse_mode': 'Markdown'})
 
 
+def notify_shipment_approval_sync(shipment_id: int):
+    """Queue a shipment approval report (PDF) to the admin.
+    The outbox worker generates the multi-page landed-cost/tax PDF
+    and sends it as a document, like the daily sales PDF."""
+    queue_notification(
+        'shipment_approval_report',
+        ADMIN_ID,
+        {'shipment_id': shipment_id}
+    )
+
+
 async def send_notification_to_store_team(message: str):
     """Deprecated – kept only for internal reference; all external callers use queue."""
     logger.warning("Direct send_notification_to_store_team called – should use queue instead.")

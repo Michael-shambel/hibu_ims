@@ -25,6 +25,7 @@ REPORT_NOTIFICATION_TYPES = {
     'supplier_summary_admin',
     'customer_summary',
     'customer_summary_admin',
+    'shipment_approval_report',
 }
 
 # ---------------------------------------------------------------------
@@ -50,6 +51,7 @@ DEDUP_TYPES = {
     'supplier_summary',
     'supplier_summary_admin',
     'monthly_profit_report',
+    'shipment_approval_report',
     'order_notification',
     'despatch_notification',
     'sale_cancellation',
@@ -101,6 +103,9 @@ def _get_dedup_key(notification_type: str, payload: dict, chat_id: int):
         if purchase_id is not None:
             return (notification_type, purchase_id, chat_id)
         return (notification_type, hash(payload.get('text', '')), chat_id)
+
+    elif notification_type == 'shipment_approval_report':
+        return (notification_type, payload.get('shipment_id'))
 
     return None
 
@@ -349,7 +354,8 @@ async def _safe_send_document(bot: Bot, chat_id: int, timeout: float = _REPORT_S
 # ---------------------------------------------------------------------
 async def _dispatch_notification(bot: Bot, nt: str, chat_id: int, payload: dict, notif_id: int):
     if nt in ('order_notification', 'despatch_confirmation', 'despatch_notification', 'admin_copy',
-              'unusual_alert', 'generic_message', 'sale_cancellation', 'purchase_notification'):
+              'unusual_alert', 'generic_message', 'sale_cancellation', 'purchase_notification',
+              'stock_in_notification'):
         await _send_generic_message(bot, chat_id, payload)
 
     elif nt == 'daily_sales_report':
@@ -366,6 +372,9 @@ async def _dispatch_notification(bot: Bot, nt: str, chat_id: int, payload: dict,
 
     elif nt == 'supplier_summary_admin':
         await _send_supplier_summary_admin(bot, chat_id, payload, notif_id)
+
+    elif nt == 'shipment_approval_report':
+        await _send_shipment_approval_report(bot, chat_id, payload, notif_id)
 
     else:
         raise ValueError(f"Unknown notification type: {nt}")
@@ -642,6 +651,63 @@ async def _send_customer_summary(bot: Bot, chat_id: int, payload: dict, notif_id
             timeout=_REPORT_SEND_TIMEOUT
         )
         await asyncio.to_thread(_mark_step_done, notif_id, 'credit_items_pdf')
+
+
+# ---------------------------------------------------------------------
+# Shipment Approval Report (to admin)
+# ---------------------------------------------------------------------
+async def _send_shipment_approval_report(bot: Bot, chat_id: int, payload: dict, notif_id: int):
+    from services.import_shipment_service import ImportShipmentService
+    from services.bank_account_service import BankAccountService
+    from telegrambot.handlers.reports.shipment_report import generate_shipment_approval_pdf
+
+    shipment_id = payload.get('shipment_id')
+    if not shipment_id:
+        raise ValueError("Missing shipment_id in shipment approval payload")
+
+    service = ImportShipmentService()
+    sent_steps = set(payload.get('_sent_steps', []))
+
+    def _load_shipment():
+        return service.get_by_id_with_relations(shipment_id)
+
+    shipment = await asyncio.to_thread(_load_shipment)
+    if not shipment:
+        raise ValueError(f"Shipment #{shipment_id} not found")
+
+    supplier_name = shipment.supplier.supplier_name if shipment.supplier else "Unknown"
+    date_str = shipment.proforma_date.strftime("%d/%m/%Y") if shipment.proforma_date else ""
+
+    # Step 1: short text notice
+    if 'text' not in sent_steps:
+        caption = (
+            f"🚢 *Shipment #{shipment_id} Approved*\n"
+            f"Supplier: {supplier_name}\n"
+            f"Proforma Date: {date_str}\n"
+            f"📄 Full landed-cost / tax PDF attached."
+        )
+        await _safe_send_message(bot, chat_id, text=caption, parse_mode='Markdown', timeout=_REPORT_SEND_TIMEOUT)
+        await asyncio.to_thread(_mark_step_done, notif_id, 'text')
+
+    # Step 2: PDF document
+    if 'document' not in sent_steps:
+        def _gen_pdf():
+            tax_bank_name = ""
+            if shipment.tax_bank_account_id:
+                bank = BankAccountService().get_by_id(shipment.tax_bank_account_id)
+                if bank:
+                    tax_bank_name = f"{bank.bank_name} - {bank.account_name}"
+            return generate_shipment_approval_pdf(shipment, tax_bank_name)
+
+        pdf_bytes = await asyncio.to_thread(_gen_pdf)
+        await _safe_send_document(
+            bot, chat_id,
+            document=BytesIO(pdf_bytes),
+            filename=f"shipment_{shipment_id}_approval.pdf",
+            caption=f"🚢 Shipment #{shipment_id} – {supplier_name} – Landed Cost & Margin",
+            timeout=_REPORT_SEND_TIMEOUT
+        )
+        await asyncio.to_thread(_mark_step_done, notif_id, 'document')
 
 
 async def _send_customer_summary_admin(bot: Bot, chat_id: int, payload: dict, notif_id: int):
