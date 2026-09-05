@@ -2664,31 +2664,31 @@ class SalesManager(QWidget):
 
             if not items:
                 QMessageBox.warning(self, "Validation", "Please add at least one product!")
-                return
-
-            # Get common data
+                return            # Get common data
             labour_expense = float(self.labour_total.text()) if self.labour_total.text() else 0.0
-            delivery_name = self.delivery_name.text().strip()
-            if not delivery_name:
-                QMessageBox.warning(self, "Validation", "Please add delivery information!")
-                return
-
             delivery_phone = None
             delivery_place = None
             delivery_plate = None
 
             if self.is_credit_mode:
+                # Credit mode: no delivery required, no stock allocation needed
                 self.save_credit_sale(
                     customer_id=customer_id,
                     user_id=user_id,
                     labour_expense=labour_expense,
                     items=items,
-                    delivery_name=delivery_name,
-                    delivery_phone=delivery_phone,
-                    delivery_place=delivery_place,
-                    delivery_plate=delivery_plate
+                    delivery_name=None,
+                    delivery_phone=None,
+                    delivery_place=None,
+                    delivery_plate=None
                 )
             else:
+                # Live mode: delivery info required
+                delivery_name = self.delivery_name.text().strip()
+                if not delivery_name:
+                    QMessageBox.warning(self, "Validation", "Please add delivery information!")
+                    return
+
                 # Live mode - with payment type and bank
                 product_qty_in_sale = {}
                 for item in items:
