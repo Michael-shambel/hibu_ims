@@ -65,7 +65,7 @@ class StockInMappingDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.setAlternatingRowColors(True)
         self.table.setFont(QFont("Segoe UI", 11))
-        self.table.verticalHeader().setDefaultSectionSize(55)
+        self.table.verticalHeader().setDefaultSectionSize(75)
         # Set a fixed width for the checkbox column so it's visible
         self.table.setColumnWidth(8, 100)
 
@@ -96,7 +96,7 @@ class StockInMappingDialog(QDialog):
             # Local Product Name – pre‑filled with shipment product name
             name_edit = ModernLineEdit("Local Name", "Type product name...")
             name_edit.setText(sp.product_name)
-            name_edit.setMinimumHeight(40)
+            name_edit.setMinimumHeight(55)
             completer = ShipmentProductCompleter(self.product_service, parent=self)
             completer.setLineEdit(name_edit.line_edit)
             completer.productSelected.connect(lambda pid, r=row: self.on_product_selected(r, pid))
@@ -107,7 +107,7 @@ class StockInMappingDialog(QDialog):
             unit_edit = QLineEdit()
             unit_edit.setText(sp.unit)
             unit_edit.setPlaceholderText("Unit")
-            unit_edit.setMinimumHeight(40)
+            unit_edit.setMinimumHeight(55)
             self.table.setCellWidget(row, 3, unit_edit)
 
             # Qty (cartons) – read‑only

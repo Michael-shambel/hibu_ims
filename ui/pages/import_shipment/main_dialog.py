@@ -514,6 +514,9 @@ class ImportShipmentDialog(
             return
 
         # ---- 4. Prepare shipment data ----
+        # Get tax payment data
+        tax_payment_data = self.get_tax_payment_data()
+        
         data = {
             "supplier_id": supplier_id,
             "bank_account_id": bank_id,
@@ -530,7 +533,10 @@ class ImportShipmentDialog(
             "tax_total_usd": tax_total_usd,
             "tax_sample_frt": tax_sample_frt,
             "tax_rater": tax_rater,
-            "tax_freight_ratio": tax_freight_ratio
+            "tax_freight_ratio": tax_freight_ratio,
+            "tax_paid": tax_payment_data.get('tax_paid', False),
+            "tax_bank_account_id": tax_payment_data.get('bank_account_id'),
+            "tax_payment_date": tax_payment_data.get('payment_date'),
         }
 
         # ---- 5. Save via service ----
@@ -710,6 +716,14 @@ class ImportShipmentDialog(
         self.tax_rater.setValue(shipment.tax_rater or 0.15)
         if shipment.tax_freight_ratio:
             self.tax_freight_ratio_label.setText(f"{shipment.tax_freight_ratio:.4f}")
+
+        # ---- Load tax payment data ----
+        if hasattr(shipment, 'tax_paid'):
+            self.set_tax_payment_data(
+                bank_account_id=shipment.tax_bank_account_id,
+                payment_date=shipment.tax_payment_date,
+                paid=shipment.tax_paid
+            )
 
         # ---- Populate tax table from shipment products ----
         self.populate_tax_table()

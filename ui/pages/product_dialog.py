@@ -1228,6 +1228,7 @@ class ProductFormDialog(QDialog):
         self.table_section.show()
         self.summary_row.show()
         self.add_product_btn.show()
+        self.send_notifications_checkbox.show()  # Show notifications checkbox for stock-in
         self.finish_btn.setText("💾 Save Stock In")
         self.finish_btn.clicked.disconnect()
         self.finish_btn.clicked.connect(self.save_stock_in_multiple)
@@ -1378,7 +1379,7 @@ class ProductFormDialog(QDialog):
     
 
     def save_stock_in_multiple(self):
-        """Save all products in the table as stock-in entries validate_current_product"""
+        """Save all products in the table as stock-in entries and notify store team."""
         if not self.product_lines:
             QMessageBox.warning(self, "Validation", "Add at least one product.")
             return
@@ -1392,6 +1393,7 @@ class ProductFormDialog(QDialog):
 
         success_count = 0
         failed_lines = []
+        product_names = []
 
         for idx, line in enumerate(self.product_lines):
             batch_data = {
@@ -1408,6 +1410,7 @@ class ProductFormDialog(QDialog):
             )
             if success:
                 success_count += 1
+                product_names.append(line['name'])
             else:
                 failed_lines.append(f"Line {idx+1}: {line['name']}")
 
@@ -1419,6 +1422,23 @@ class ProductFormDialog(QDialog):
             )
         else:
             QMessageBox.information(self, "Success", f"Added {success_count} product(s) successfully!")
+
+        # Send notification to store team about stock-in
+        if success_count > 0 and self.send_notifications_checkbox.isChecked():
+            try:
+                product_list = "\r\n".join([f"• {name}" for name in product_names])
+                message = (
+                    f"📦 <b>Stock In Completed</b>\r\n"
+                    f"───────────────────\r\n"
+                    f"<b>Products Added:</b>\r\n{product_list}\r\n"
+                    f"───────────────────\r\n"
+                    f"Total: {success_count} product(s)"
+                )
+                from telegrambot.bot import notify_store_team_sync
+                notify_store_team_sync(message, notification_type='stock_in_notification')
+                logger.info(f"Stock-in notification sent for {success_count} products")
+            except Exception as e:
+                logger.error(f"Failed to send stock-in notification: {e}")
 
         self.product_saved.emit(None)
         self.accept()

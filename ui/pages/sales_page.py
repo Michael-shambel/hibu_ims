@@ -3139,6 +3139,8 @@ class SalesManager(QWidget):
         self.update_same_day_credit_count()
         self.refresh_product_combos()
         self.load_customers()
+        # Refresh bank account combos so newly created banks are visible
+        self.refresh_payment_bank_combos()
         walking = self.customer_service.get_by_name("walking customer")
         if walking:
             idx = self.customer_combo.findData(walking.id)

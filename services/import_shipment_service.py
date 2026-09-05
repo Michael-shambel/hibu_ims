@@ -33,8 +33,24 @@ class ImportShipmentService(BaseService):
         if not bank_account_id or not payment_date:
             return None
 
-        # Balance check
-        current_balance = self.bank_tx_service.get_balance(bank_account_id)
+        # Balance check - use current session state (not fresh query)
+        from sqlalchemy import func
+        query = session.query(func.sum(BankTransaction.amount)).filter(
+            BankTransaction.bank_account_id == bank_account_id,
+            BankTransaction.is_deleted == False,
+            BankTransaction.direction == TransactionDirectionEnum.CREDIT
+        )
+        credit_total = query.scalar() or 0.0
+        
+        query = session.query(func.sum(BankTransaction.amount)).filter(
+            BankTransaction.bank_account_id == bank_account_id,
+            BankTransaction.is_deleted == False,
+            BankTransaction.direction == TransactionDirectionEnum.DEBIT
+        )
+        debit_total = query.scalar() or 0.0
+        
+        current_balance = credit_total - debit_total
+
         if current_balance < cost_data['amount']:
             raise ValueError(
                 f"Insufficient funds in account {bank_account_id}. "
@@ -66,7 +82,24 @@ class ImportShipmentService(BaseService):
         if amount_etb <= 0:
             return None
 
-        current_balance = self.bank_tx_service.get_balance(bank_account_id)
+        # Calculate balance from current session state
+        from sqlalchemy import func
+        query = session.query(func.sum(BankTransaction.amount)).filter(
+            BankTransaction.bank_account_id == bank_account_id,
+            BankTransaction.is_deleted == False,
+            BankTransaction.direction == TransactionDirectionEnum.CREDIT
+        )
+        credit_total = query.scalar() or 0.0
+        
+        query = session.query(func.sum(BankTransaction.amount)).filter(
+            BankTransaction.bank_account_id == bank_account_id,
+            BankTransaction.is_deleted == False,
+            BankTransaction.direction == TransactionDirectionEnum.DEBIT
+        )
+        debit_total = query.scalar() or 0.0
+        
+        current_balance = credit_total - debit_total
+
         if current_balance < amount_etb:
             raise ValueError(
                 f"Insufficient funds in account {bank_account_id}. "
@@ -80,6 +113,52 @@ class ImportShipmentService(BaseService):
             'transaction_date': payment_date or date.today(),
             'description': f"Shipment #{shipment_id} - FOB Payment",
             'reference_number': f"SHIP-FOB-{shipment_id}"
+        }
+        tx = self.bank_tx_service._create_transaction_in_session(session, tx_data)
+        if tx:
+            session.flush()
+            return tx.id
+        return None
+
+    # ------------------------------------------------------------------
+    # Helper to create bank transaction for total tax
+    # ------------------------------------------------------------------
+    def _create_tax_transaction(self, session, shipment_id, bank_account_id, amount_etb, payment_date):
+        if amount_etb <= 0:
+            return None
+
+        # Calculate balance from current session state (not a fresh query)
+        # This ensures we see the correct balance after deleting old transactions
+        from sqlalchemy import func
+        query = session.query(func.sum(BankTransaction.amount)).filter(
+            BankTransaction.bank_account_id == bank_account_id,
+            BankTransaction.is_deleted == False,
+            BankTransaction.direction == TransactionDirectionEnum.CREDIT
+        )
+        credit_total = query.scalar() or 0.0
+        
+        query = session.query(func.sum(BankTransaction.amount)).filter(
+            BankTransaction.bank_account_id == bank_account_id,
+            BankTransaction.is_deleted == False,
+            BankTransaction.direction == TransactionDirectionEnum.DEBIT
+        )
+        debit_total = query.scalar() or 0.0
+        
+        current_balance = credit_total - debit_total
+
+        if current_balance < amount_etb:
+            raise ValueError(
+                f"Insufficient funds in account {bank_account_id}. "
+                f"Available: {current_balance:.2f}, Required: {amount_etb:.2f}"
+            )
+
+        tx_data = {
+            'bank_account_id': bank_account_id,
+            'amount': amount_etb,
+            'direction': TransactionDirectionEnum.DEBIT,
+            'transaction_date': payment_date or date.today(),
+            'description': f"Shipment #{shipment_id} - Customs Tax Payment",
+            'reference_number': f"SHIP-TAX-{shipment_id}"
         }
         tx = self.bank_tx_service._create_transaction_in_session(session, tx_data)
         if tx:
@@ -174,6 +253,27 @@ class ImportShipmentService(BaseService):
                 if fob_tx_id:
                     affected_accounts.add(shipment.bank_account_id)
 
+            # Handle Tax payment if PAID
+            tax_paid = data.get('tax_paid', False)
+            tax_bank_account_id = data.get('tax_bank_account_id')
+            if tax_paid and tax_bank_account_id:
+                # Calculate total tax from products
+                total_tax_etb = 0.0
+                for prod in data['products']:
+                    total_tax_etb += prod.get('total_tax_etb', 0.0)
+                
+                if total_tax_etb > 0:
+                    tax_payment_date = data.get('tax_payment_date') or data.get('payment_date') or shipment.proforma_date
+                    tax_tx_id = self._create_tax_transaction(
+                        session,
+                        shipment.id,
+                        tax_bank_account_id,
+                        total_tax_etb,
+                        tax_payment_date
+                    )
+                    if tax_tx_id:
+                        affected_accounts.add(tax_bank_account_id)
+
             # Save costs
             costs = data.get('costs', [])
             for cost in costs:
@@ -228,6 +328,9 @@ class ImportShipmentService(BaseService):
             shipment.tax_sample_frt = data.get('tax_sample_frt')
             shipment.tax_rater = data.get('tax_rater')
             shipment.tax_freight_ratio = data.get('tax_freight_ratio')
+            shipment.tax_paid = data.get('tax_paid', False)
+            shipment.tax_bank_account_id = data.get('tax_bank_account_id')
+            shipment.tax_payment_date = data.get('tax_payment_date')
 
             # Update payment status
             new_payment_status = data.get('payment_status', PaymentStatusEnum.CREDIT.value)
@@ -260,6 +363,15 @@ class ImportShipmentService(BaseService):
                         tx.is_deleted = True
                         affected_accounts.add(tx.bank_account_id)
                 session.delete(cost)
+
+            # Delete old tax transaction if exists
+            old_tax_tx = session.query(BankTransaction).filter(
+                BankTransaction.reference_number == f"SHIP-TAX-{shipment_id}",
+                BankTransaction.is_deleted == False
+            ).first()
+            if old_tax_tx:
+                old_tax_tx.is_deleted = True
+                affected_accounts.add(old_tax_tx.bank_account_id)
 
             for acc_id in affected_accounts:
                 self.bank_tx_service.recalculate_balances_for_account(session, acc_id)
@@ -315,6 +427,26 @@ class ImportShipmentService(BaseService):
                 )
                 if fob_tx_id:
                     affected_accounts.add(shipment.bank_account_id)
+
+            # Create new tax transaction if PAID
+            tax_paid = data.get('tax_paid', False)
+            tax_bank_account_id = data.get('tax_bank_account_id')
+            if tax_paid and tax_bank_account_id:
+                total_tax_etb = 0.0
+                for prod in data['products']:
+                    total_tax_etb += prod.get('total_tax_etb', 0.0)
+                
+                if total_tax_etb > 0:
+                    tax_payment_date = data.get('tax_payment_date') or data.get('payment_date') or shipment.proforma_date
+                    tax_tx_id = self._create_tax_transaction(
+                        session,
+                        shipment.id,
+                        tax_bank_account_id,
+                        total_tax_etb,
+                        tax_payment_date
+                    )
+                    if tax_tx_id:
+                        affected_accounts.add(tax_bank_account_id)
 
             # Add new costs
             for cost in data.get('costs', []):
@@ -443,11 +575,20 @@ class ImportShipmentService(BaseService):
             if shipment.stocked_in:
                 raise ValueError("Shipment already stocked in")
 
-            # Credit shipments: all costs must be paid
+            # Credit shipments: all costs AND tax must be paid
             if shipment.payment_status == "credit":
                 unpaid_costs = [c for c in shipment.costs if c.bank_transaction_id is None]
                 if unpaid_costs:
                     raise ValueError(f"All shipment costs must be paid. {len(unpaid_costs)} cost(s) are unpaid.")
+                
+                # Check if tax transaction exists and is paid
+                tax_tx = session.query(BankTransaction).filter(
+                    BankTransaction.reference_number == f"SHIP-TAX-{shipment.id}",
+                    BankTransaction.is_deleted == False
+                ).first()
+                # If tax was marked as paid but no transaction exists, raise error
+                if shipment.tax_paid and not tax_tx:
+                    raise ValueError("Tax payment transaction not found. Please re-save the shipment.")
 
             # Build product data
             products_data = []
@@ -561,8 +702,17 @@ class ImportShipmentService(BaseService):
             self._create_purchase_payment_from_bank_tx(session, tx, payment_term)
 
     def _link_cost_bank_transactions(self, session, shipment, payment_term):
-        """Link only cost transactions for credit shipments, return total paid amount."""
+        """Link cost AND tax transactions for credit shipments, return total paid amount.
+        
+        For credit shipments, the paid amount should include:
+        - All cost transactions (costs paid from bank)
+        - Tax transaction (customs tax paid from bank, if applicable)
+        
+        The remaining balance will be the FOB value only.
+        """
         paid_amount = 0.0
+        
+        # Link cost transactions
         cost_txs = session.query(BankTransaction).join(ShipmentCost).filter(
             ShipmentCost.shipment_id == shipment.id,
             BankTransaction.is_deleted == False
@@ -571,6 +721,19 @@ class ImportShipmentService(BaseService):
             tx.purchase_payment_term_id = payment_term.id
             self._create_purchase_payment_from_bank_tx(session, tx, payment_term)
             paid_amount += tx.amount
+        
+        # Link tax transaction (if exists and not already linked)
+        tax_txs = session.query(BankTransaction).filter(
+            BankTransaction.reference_number == f"SHIP-TAX-{shipment.id}",
+            BankTransaction.is_deleted == False
+        ).all()
+        for tx in tax_txs:
+            # Check if already linked to avoid duplicates
+            if tx.purchase_payment_term_id is None:
+                tx.purchase_payment_term_id = payment_term.id
+                self._create_purchase_payment_from_bank_tx(session, tx, payment_term)
+                paid_amount += tx.amount
+        
         return paid_amount
 
     def _create_purchase_payment_from_bank_tx(self, session, bank_tx, payment_term):

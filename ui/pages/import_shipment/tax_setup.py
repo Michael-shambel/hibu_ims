@@ -2,12 +2,14 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QFormLayout, QLabel,
     QDoubleSpinBox, QHBoxLayout, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy
+    QHeaderView, QSizePolicy, QComboBox, QCheckBox,
+    QMessageBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QFont, QColor
 
 from ui.pages.product_dialog import ModernLineEdit
+from ui.components.ethiopian_date import EthiopianDateEdit
 
 
 class TaxSetupMixin:
@@ -165,13 +167,59 @@ class TaxSetupMixin:
 
         layout.addWidget(table_group, 1)
 
+        # ---- Tax Payment Section (similar to Add Cost dialog) ----
+        tax_payment_group = QGroupBox("Tax Payment")
+        tax_payment_layout = QFormLayout(tax_payment_group)
+
+        self.tax_paid_checkbox = QCheckBox("Paid from Bank Account")
+        self.tax_paid_checkbox.toggled.connect(self.on_tax_paid_toggled)
+
+        # Paid details group (initially hidden)
+        self.tax_paid_group = QGroupBox()
+        tax_paid_layout = QFormLayout(self.tax_paid_group)
+
+        self.tax_bank_combo = QComboBox()
+        self.tax_bank_combo.setEditable(True)
+        self.tax_bank_combo.lineEdit().setPlaceholderText("Select bank account...")
+        tax_paid_layout.addRow("Bank Account:", self.tax_bank_combo)
+
+        self.tax_payment_date = EthiopianDateEdit()
+        self.tax_payment_date.setDate(QDate.currentDate())
+        tax_paid_layout.addRow("Payment Date:", self.tax_payment_date)
+
+        self.tax_paid_group.setVisible(False)
+
+        tax_payment_layout.addRow(self.tax_paid_checkbox)
+        tax_payment_layout.addRow(self.tax_paid_group)
+
+        layout.addWidget(tax_payment_group)
+
         self.tabs.addTab(self.tax_tab, "💰 Custom Tax")
 
         # Initialise tax values
         self._tax_ps_values = {}
         self._current_freight_ratio = 0.0
         self._current_rater = 0.15
-        self._current_usd_rate = 160.00
+        self._current_usd_rate = 160.0
+        self._tax_bank_account_id = None
+        self._tax_paid = False
+        self._tax_payment_date = None
+
+        # Load bank accounts for tax payment
+        self.load_tax_bank_accounts()
+
+    def load_tax_bank_accounts(self):
+        from services.bank_account_service import BankAccountService
+        service = BankAccountService()
+        accounts = service.get_all()
+        self.tax_bank_combo.clear()
+        self.tax_bank_combo.addItem("Select Bank Account", None)
+        for acc in accounts:
+            if acc.is_active:
+                display = f"{acc.bank_name} - {acc.account_name}"
+                self.tax_bank_combo.addItem(display, acc.id)
+        if self.tax_bank_combo.count() > 0:
+            self.tax_bank_combo.setCurrentIndex(0)
 
     # ------------------------------------------------------------------
     # All methods below remain exactly as they were (no changes needed)
@@ -211,7 +259,7 @@ class TaxSetupMixin:
 
         self.tax_summary_label.setText(f"Total Tax Payable: ETB {total_tax:,.2f}")
         self.calculate_landed()
-    
+
     def _recalculate_tax_row(self, row):
         """Recalculate a single tax row."""
         # Get Qty/doz from editable column 3
@@ -286,6 +334,12 @@ class TaxSetupMixin:
             item.setFlags(item.flags() | Qt.ItemIsEditable)
             item.setBackground(QColor(255, 255, 255))
 
+    def on_tax_paid_toggled(self, checked):
+        """Show/hide bank account selection for tax payment."""
+        self.tax_paid_group.setVisible(checked)
+        self.tax_paid = checked
+        self._tax_bank_account_id = self.tax_bank_combo.currentData() if checked else None
+
     def on_tax_cell_changed(self, row, col):
         """Handle changes to editable cells (Qty/doz or USD/doz)."""
         if col in (3, 4):  # Qty/doz or USD/doz
@@ -301,6 +355,33 @@ class TaxSetupMixin:
                         pass
             self.tax_summary_label.setText(f"Total Tax Payable: ETB {total_tax:,.2f}")
             self.calculate_landed()
+
+    def get_tax_payment_data(self):
+        """Get tax payment data for saving."""
+        paid = self.tax_paid_checkbox.isChecked()
+        return {
+            "tax_paid": paid,
+            "bank_account_id": self.tax_bank_combo.currentData() if paid else None,
+            "payment_date": self.tax_payment_date.date().toPython() if paid else None,
+        }
+
+    def set_tax_payment_data(self, bank_account_id=None, payment_date=None, paid=False):
+        """Set tax payment data from loaded shipment."""
+        self._tax_bank_account_id = bank_account_id
+        self._tax_payment_date = payment_date
+        self._tax_paid = paid
+
+        self.tax_paid_checkbox.setChecked(paid)
+        if paid and bank_account_id:
+            # Find and select the bank account in combo
+            idx = self.tax_bank_combo.findData(bank_account_id)
+            if idx >= 0:
+                self.tax_bank_combo.setCurrentIndex(idx)
+            if payment_date:
+                # Convert date object to QDate
+                if hasattr(payment_date, 'year'):
+                    qdate = QDate(payment_date.year, payment_date.month, payment_date.day)
+                    self.tax_payment_date.setDate(qdate)
 
     def populate_tax_table(self):
         """Populate the tax table from the current shipment products."""
@@ -371,22 +452,6 @@ class TaxSetupMixin:
         else:
             self.tax_summary_label.setText("Total Tax Payable: ETB 0.00")
 
-    # def _update_landed_tax_values(self):
-    #     """Update the Tax/Ps values in the landed cost table (Tab 4)."""
-    #     if not hasattr(self, '_tax_ps_values') or not hasattr(self, 'landed_table'):
-    #         return
-
-    #     for row in range(self.landed_table.rowCount()):
-    #         name_item = self.landed_table.item(row, 0)
-    #         if name_item:
-    #             product_name = name_item.text().strip()
-    #             tax_ps = self._tax_ps_values.get(product_name, 0.0)
-    #             # Column 7 is now Tax/Ps
-    #             if self.landed_table.columnCount() > 7:
-    #                 tax_item = self.landed_table.item(row, 7)
-    #                 if tax_item:
-    #                     tax_item.setText(f"{tax_ps:,.2f}")
-
     def clear_tax_table(self):
         """Clear the tax table when products change."""
         if not hasattr(self, 'tax_table'):
@@ -417,6 +482,10 @@ class TaxSetupMixin:
                     else:
                         item.setFlags(item.flags() | Qt.ItemIsEditable)
 
+        # Also disable tax payment UI when read-only
+        self.tax_paid_checkbox.setEnabled(not enabled)
+        self.tax_bank_combo.setEnabled(not enabled)
+
     def _set_tax_cell(self, row, col, text, editable=False):
         """Set a table cell with proper flags."""
         item = self.tax_table.item(row, col)
@@ -432,3 +501,15 @@ class TaxSetupMixin:
         else:
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             item.setBackground(QColor(240, 240, 240))
+
+    def get_total_tax_amount(self):
+        """Calculate and return the total tax amount from the tax table."""
+        total_tax = 0.0
+        for row in range(self.tax_table.rowCount()):
+            tax_item = self.tax_table.item(row, 11)  # Total Tax ETB
+            if tax_item and tax_item.text():
+                try:
+                    total_tax += float(tax_item.text().replace(',', ''))
+                except ValueError:
+                    pass
+        return total_tax
