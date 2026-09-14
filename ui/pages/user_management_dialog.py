@@ -50,8 +50,8 @@ class UserManagementDialog(QDialog):
         layout = QVBoxLayout(self.user_list_tab)
 
         self.users_table = QTableWidget()
-        self.users_table.setColumnCount(4)
-        self.users_table.setHorizontalHeaderLabels(["ID", "Username", "Role", "Status"])
+        self.users_table.setColumnCount(5)
+        self.users_table.setHorizontalHeaderLabels(["ID", "Username", "Role", "Status", "Telegram Chat ID"])
         self.users_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.users_table.setSelectionBehavior(QTableWidget.SelectRows)
         layout.addWidget(self.users_table)
@@ -152,6 +152,13 @@ class UserManagementDialog(QDialog):
                 if user.is_deleted:
                     status_item.setForeground(QColor("red"))
                 self.users_table.setItem(row, 3, status_item)
+
+                # Show Telegram chat_id if registered
+                chat_id_str = str(user.chat_id) if user.chat_id else "Not linked"
+                chat_id_item = QTableWidgetItem(chat_id_str)
+                if not user.chat_id:
+                    chat_id_item.setForeground(QColor("#999999"))
+                self.users_table.setItem(row, 4, chat_id_item)
   
                 self.change_pw_username_combo.addItem(user.username, user.id)
 

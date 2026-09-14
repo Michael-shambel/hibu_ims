@@ -9,7 +9,6 @@ from telegram.request import HTTPXRequest
 from sqlalchemy.orm import joinedload
 
 from models.pending_notification import PendingNotification
-from telegrambot.handlers.menu_handlers.states import ETHIOPIAN_MONTHS
 from services.base_service import get_session
 from config import BOT_TOKEN, ADMIN_ID
 
@@ -26,6 +25,7 @@ REPORT_NOTIFICATION_TYPES = {
     'customer_summary',
     'customer_summary_admin',
     'shipment_approval_report',
+    'profit_report',
 }
 
 # ---------------------------------------------------------------------
@@ -51,6 +51,7 @@ DEDUP_TYPES = {
     'supplier_summary',
     'supplier_summary_admin',
     'monthly_profit_report',
+    'profit_report',
     'shipment_approval_report',
     'order_notification',
     'despatch_notification',
@@ -67,6 +68,9 @@ def _get_dedup_key(notification_type: str, payload: dict, chat_id: int):
 
     elif notification_type == 'monthly_profit_report':
         return ('monthly_profit_report', payload.get('eth_year'), payload.get('eth_month'))
+
+    elif notification_type == 'profit_report':
+        return ('profit_report', payload.get('period_type'), payload.get('start_date'), payload.get('end_date'))
 
     elif notification_type in ('customer_summary', 'customer_summary_admin'):
         sale_id = payload.get('sale_id')
@@ -376,6 +380,9 @@ async def _dispatch_notification(bot: Bot, nt: str, chat_id: int, payload: dict,
     elif nt == 'shipment_approval_report':
         await _send_shipment_approval_report(bot, chat_id, payload, notif_id)
 
+    elif nt == 'profit_report':
+        await _send_profit_report(bot, chat_id, payload, notif_id)
+
     else:
         raise ValueError(f"Unknown notification type: {nt}")
 
@@ -391,53 +398,33 @@ async def _send_generic_message(bot: Bot, chat_id: int, payload: dict):
 # Daily Sales Report
 # ---------------------------------------------------------------------
 async def _send_daily_sales_report(bot: Bot, chat_id: int, payload: dict, notif_id: int):
-    from services.new_sale_service import NewSaleService
-    from telegrambot.handlers.reports.sales_report import generate_sales_pdf, _build_sales_summary
-    from ui.components.ethiopian_date import EthiopianDateConverter
-    from services.base_service import get_session
+    """Send daily sales & profit PDF to a single chat."""
+    from telegrambot.handlers.reports.daily_sales_report import (
+        daily_report_data, daily_report_caption, daily_report_pdf, daily_report_filename,
+    )
 
     target_date = datetime.strptime(payload['target_date'], '%Y-%m-%d').date()
-    sale_service = NewSaleService()
     sent_steps = set(payload.get('_sent_steps', []))
 
-    def _fetch_and_build():
-        sales, _ = sale_service.get_all_sales_paginated(
-            page=1, page_size=10000, filter_date=target_date
-        )
-        if not sales:
-            return {
-                'total_sales_amount': 0.0,
-                'total_labour_expense': 0.0,
-                'cash_total': 0.0,
-                'bank_total': 0.0,
-                'item_details': [],
-            }
-        with get_session() as session:
-            return _build_sales_summary(sales, target_date, session, sale_service)
+    # Step 1: Build data (all DB work off the event loop)
+    data = await asyncio.to_thread(daily_report_data, target_date)
 
-    summary = await asyncio.to_thread(_fetch_and_build)
-    eth_year, eth_month, eth_day = EthiopianDateConverter.to_ethiopian(target_date)
-
-    # Step 1: Text message
+    # Step 2: Text message
     if 'text' not in sent_steps:
-        caption = (
-            f"📊 *Daily Sales Report*\n"
-            f"📅 {ETHIOPIAN_MONTHS[eth_month - 1][0]} {eth_day}, {eth_year} "
-            f"(Gregorian: {target_date})\n"
-            f"💰 Total Sales: ETB {summary['total_sales_amount']:,.2f}"
+        await _safe_send_message(
+            bot, chat_id,
+            text=daily_report_caption(data, target_date),
+            parse_mode='Markdown', timeout=_REPORT_SEND_TIMEOUT
         )
-        await _safe_send_message(bot, chat_id, text=caption, parse_mode='Markdown', timeout=_REPORT_SEND_TIMEOUT)
         await asyncio.to_thread(_mark_step_done, notif_id, 'text')
 
-    # Step 2: PDF document
+    # Step 3: PDF document
     if 'document' not in sent_steps:
-        pdf_bytes = await asyncio.to_thread(
-            generate_sales_pdf, summary, eth_year, eth_month, eth_day, target_date
-        )
+        pdf_bytes = await asyncio.to_thread(daily_report_pdf, data, target_date)
         await _safe_send_document(
             bot, chat_id,
             document=BytesIO(pdf_bytes),
-            filename=f"daily_sales_{target_date}.pdf",
+            filename=daily_report_filename(target_date),
             timeout=_REPORT_SEND_TIMEOUT
         )
         await asyncio.to_thread(_mark_step_done, notif_id, 'document')
@@ -781,3 +768,58 @@ async def _send_customer_summary_admin(bot: Bot, chat_id: int, payload: dict, no
             timeout=_REPORT_SEND_TIMEOUT
         )
         await asyncio.to_thread(_mark_step_done, notif_id, 'credit_items_pdf')
+
+
+# ---------------------------------------------------------------------
+# Profit Report (periodic — daily/monthly/quarterly/semi-annual/annual)
+# ---------------------------------------------------------------------
+async def _send_profit_report(bot: Bot, chat_id: int, payload: dict, notif_id: int):
+    """Send a periodic profit report PDF to a single chat."""
+    from datetime import date as date_cls
+    from telegrambot.handlers.reports.profit_report import (
+        generate_monthly_profit_pdf, generate_period_profit_pdf,
+        build_monthly_profit_data, build_period_profit_data,
+    )
+
+    period_type = payload['period_type']       # 'daily', 'monthly', 'quarterly', 'semiannual', 'annual'
+    period_label = payload['period_label']     # e.g. 'Monthly Profit Report', '3-Month Profit Report'
+    start_date = date_cls.fromisoformat(payload['start_date'])
+    end_date = date_cls.fromisoformat(payload['end_date'])
+    sent_steps = set(payload.get('_sent_steps', []))
+
+    # Step 1: Text message
+    if 'text' not in sent_steps:
+        caption = (
+            f"📊 *{period_label}*\n"
+            f"📅 {start_date.strftime('%d/%m/%Y')} – {end_date.strftime('%d/%m/%Y')}\n"
+            f"📄 PDF report attached below."
+        )
+        await _safe_send_message(bot, chat_id, text=caption, parse_mode='Markdown', timeout=_REPORT_SEND_TIMEOUT)
+        await asyncio.to_thread(_mark_step_done, notif_id, 'text')
+
+    # Step 2: PDF document
+    if 'document' not in sent_steps:
+        def _build_pdf():
+            if period_type == 'daily':
+                # Same builder the scheduled daily send and the bot's back-dated
+                # flow use, so all three render an identical report.
+                from telegrambot.handlers.reports.daily_sales_report import (
+                    daily_report_data, daily_report_pdf,
+                )
+                return daily_report_pdf(daily_report_data(start_date), start_date)
+            elif period_type == 'monthly':
+                data = build_monthly_profit_data(start_date, end_date)
+                return generate_monthly_profit_pdf(period_label, start_date, end_date, data)
+            else:   # quarterly, semiannual, annual
+                data = build_period_profit_data(start_date, end_date)
+                return generate_period_profit_pdf(period_label, start_date, end_date, data)
+
+        pdf_bytes = await asyncio.to_thread(_build_pdf)
+        filename_label = period_type.replace(' ', '_')
+        await _safe_send_document(
+            bot, chat_id,
+            document=BytesIO(pdf_bytes),
+            filename=f"{filename_label}_profit_{end_date}.pdf",
+            timeout=_REPORT_SEND_TIMEOUT
+        )
+        await asyncio.to_thread(_mark_step_done, notif_id, 'document')

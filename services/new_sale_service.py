@@ -1476,6 +1476,7 @@ class NewSaleService(BaseService[ProfessionalSale]):
             results = session.query(
                 ProfessionalProduct.id.label('product_id'),
                 ProfessionalProduct.name.label('product_name'),
+                func.sum(ProfessionalSaleItem.quantity).label('carton_qty'),
                 func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen).label('total_qty'),
                 func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProductBatch.cost_price).label('total_cost'),
                 func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProfessionalSaleItem.unit_price).label('total_selling')
@@ -1502,6 +1503,7 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 total_profit += profit
                 data.append({
                     'product_name': row.product_name,
+                    'carton_qty': int(row.carton_qty),
                     'quantity': int(row.total_qty),
                     'total_cost': float(row.total_cost),
                     'total_selling': float(row.total_selling),

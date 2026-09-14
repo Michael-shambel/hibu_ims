@@ -10,7 +10,8 @@ from telegrambot.handlers.menu_handlers.states import (
     BANK_MENU, BANK_TRANSFER_FROM_ACCOUNT, BANK_TRANSFER_TO_ACCOUNT,
     BANK_TRANSFER_AMOUNT, BANK_TRANSFER_REASON, BANK_TRANSFER_EXTERNAL_PAYEE,
     EXPENSE_MENU, EXPENSE_TYPE_SELECTION, EXPENSE_BANK_ACCOUNT_SELECTION,
-    EXPENSE_CATEGORY_SELECTION, EXPENSE_AMOUNT_ENTRY
+    EXPENSE_CATEGORY_SELECTION, EXPENSE_AMOUNT_ENTRY,
+    ADMIN_AUTH_USERNAME, ADMIN_AUTH_PASSWORD
 )
 from telegrambot.handlers.menu_handlers.main_menu import (
     start, cancel, handle_role_selection, admin_menu_handler, handle_persistent_buttons, get_my_id
@@ -40,6 +41,12 @@ from telegrambot.handlers.menu_handlers.sales_team_auth import (
     receive_username_ask_password,
     receive_password_authenticate,
     sales_team_menu_handler
+)
+
+from telegrambot.handlers.menu_handlers.admin_auth import (
+    receive_admin_username,
+    receive_admin_password_authenticate,
+    admin_menu_handler as admin_auth_menu_handler
 )
 
 from telegrambot.handlers.menu_handlers.customer_menu import (
@@ -116,6 +123,12 @@ conv_handler = ConversationHandler(
         ],
         SALES_TEAM_AUTH_PASSWORD: [
             MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password_authenticate)
+        ],
+        ADMIN_AUTH_USERNAME: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_admin_username)
+        ],
+        ADMIN_AUTH_PASSWORD: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_admin_password_authenticate)
         ],
         SALES_TEAM_MENU_MAIN: [
             MessageHandler(filters.TEXT & ~filters.COMMAND, sales_team_menu_handler),

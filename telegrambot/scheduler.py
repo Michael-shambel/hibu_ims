@@ -39,41 +39,160 @@ def _safe_job(coro_func):
 
 
 # ---------------------------------------------------------------------
-# Monthly Profit Report
+# Helper: get all admin chat_ids (with ADMIN_ID fallback)
 # ---------------------------------------------------------------------
+def _get_all_admin_chat_ids() -> list:
+    """Return chat_ids of all registered admins. Falls back to [ADMIN_ID] if none."""
+    from services.auth_service import AuthService
+    try:
+        auth_svc = AuthService()
+        chat_ids = auth_svc.get_all_admin_chat_ids()
+        if chat_ids:
+            return chat_ids
+    except Exception as e:
+        logger.warning("Could not fetch admin chat_ids: %s", e)
+    return [ADMIN_ID]
+
+
+# ---------------------------------------------------------------------
+# Profit Report (periodic — daily / monthly / quarterly / semiannual / annual)
+# ---------------------------------------------------------------------
+async def queue_profit_report(
+    period_type: str,
+    period_label: str,
+    start_date: date,
+    end_date: date,
+):
+    """Queue a profit report PDF to all registered admins."""
+    admin_chat_ids = _get_all_admin_chat_ids()
+    payload = {
+        'period_type': period_type,
+        'period_label': period_label,
+        'start_date': start_date.isoformat(),
+        'end_date': end_date.isoformat(),
+    }
+    for chat_id in admin_chat_ids:
+        queue_notification('profit_report', chat_id, payload)
+    logger.info("Queued %s profit report to %d admin(s)", period_type, len(admin_chat_ids))
+
+
+# --- Pure Ethiopian-calendar helpers (unit-testable, no side effects) ---
+PROFIT_PERIOD_TYPES = ('monthly', 'quarterly', 'semiannual', 'annual')
+
+
+def _prev_eth_month(year: int, month: int):
+    return (year - 1, 13) if month == 1 else (year, month - 1)
+
+
+def _shift_eth_month(year: int, month: int, delta: int):
+    """Shift an Ethiopian (year, month) by delta months (every year has 13)."""
+    total = year * 13 + (month - 1) + delta
+    return total // 13, (total % 13) + 1
+
+
+def _eth_month_bounds(year: int, month: int):
+    """Gregorian (first_day, last_day) of an Ethiopian month."""
+    start = EthiopianDateConverter.to_gregorian(year, month, 1)
+    if month == 13:
+        nxt = EthiopianDateConverter.to_gregorian(year + 1, 1, 1)
+    else:
+        nxt = EthiopianDateConverter.to_gregorian(year, month + 1, 1)
+    return start, nxt - timedelta(days=1)
+
+
+def profit_report_day_matches(period_type: str, eth_year: int, eth_month: int, eth_day: int) -> bool:
+    """True when this Ethiopian calendar day is the send day for the period type."""
+    if period_type == 'monthly':
+        return eth_day == 1
+    if period_type == 'quarterly':
+        return eth_day == 1 and eth_month in (1, 4, 7, 10)
+    if period_type == 'semiannual':
+        return eth_day == 1 and eth_month in (1, 7)
+    if period_type == 'annual':
+        return eth_day == 1 and eth_month == 1
+    return False
+
+
+def profit_report_range(period_type: str, today_greg: date = None):
+    """
+    Return (period_label, start_date, end_date) for the period that just ended,
+    or None when today is not the send day for this period type.
+    """
+    if today_greg is None:
+        today_greg = date.today()
+
+    eth_year, eth_month, eth_day = EthiopianDateConverter.to_ethiopian(today_greg)
+    if not profit_report_day_matches(period_type, eth_year, eth_month, eth_day):
+        return None
+
+    if period_type == 'monthly':
+        y, m = _prev_eth_month(eth_year, eth_month)
+        start, end = _eth_month_bounds(y, m)
+        name = ETHIOPIAN_MONTHS[m - 1][0]
+        return (f"{name} {y} / Monthly Profit Report", start, end)
+
+    if period_type in ('quarterly', 'semiannual'):
+        span = 3 if period_type == 'quarterly' else 6
+        end_y, end_m = _prev_eth_month(eth_year, eth_month)
+        start_y, start_m = _shift_eth_month(end_y, end_m, -(span - 1))
+        start = EthiopianDateConverter.to_gregorian(start_y, start_m, 1)
+        _, end = _eth_month_bounds(end_y, end_m)
+        title = "Quarterly" if period_type == 'quarterly' else "Semi-Annual"
+        label = (f"{ETHIOPIAN_MONTHS[start_m - 1][0]} - {ETHIOPIAN_MONTHS[end_m - 1][0]} {end_y} "
+                 f"/ {title} Profit Report")
+        return (label, start, end)
+
+    if period_type == 'annual':
+        y = eth_year - 1
+        start = EthiopianDateConverter.to_gregorian(y, 1, 1)
+        _, end = _eth_month_bounds(y, 13)
+        return (f"Ethiopian Year {y} / Annual Profit Report", start, end)
+
+    return None
+
+
+async def queue_periodic_profit_report(period_type: str) -> bool:
+    """Queue one periodic profit report if today is its Ethiopian send day."""
+    rng = profit_report_range(period_type, date.today())
+    if rng is None:
+        return False
+    label, start, end = rng
+    await queue_profit_report(period_type, label, start, end)
+    return True
+
+
 async def queue_monthly_profit_report():
     """Queue monthly profit report on the first day of an Ethiopian month."""
-    today_greg = date.today()
-    eth_year, eth_month, eth_day = EthiopianDateConverter.to_ethiopian(today_greg)
-    if eth_day != 1:
-        return
+    return await queue_periodic_profit_report('monthly')
 
-    if eth_month == 1:
-        prev_year, prev_month = eth_year - 1, 13
-    else:
-        prev_year, prev_month = eth_year, eth_month - 1
 
-    queue_notification(
-        'monthly_profit_report',
-        ADMIN_ID,
-        {'eth_year': prev_year, 'eth_month': prev_month}
-    )
-    logger.info("Queued monthly profit report for Ethiopian %d-%02d", prev_year, prev_month)
+async def queue_quarterly_profit_report():
+    """Queue quarterly profit report every 3 Ethiopian months (months 1,4,7,10)."""
+    return await queue_periodic_profit_report('quarterly')
+
+
+async def queue_semiannual_profit_report():
+    """Queue semi-annual profit report every 6 Ethiopian months (months 1, 7)."""
+    return await queue_periodic_profit_report('semiannual')
+
+
+async def queue_annual_profit_report():
+    """Queue annual profit report on Meskerem 1 (Ethiopian New Year)."""
+    return await queue_periodic_profit_report('annual')
 
 
 # ---------------------------------------------------------------------
-# Daily Sales Report
+# Daily Sales Report (sent to all admins)
 # ---------------------------------------------------------------------
 async def queue_daily_sales_report(target_date: date = None):
-    """Queue a daily sales report for the given date (default today)."""
+    """Queue a daily sales report for the given date (default today) to all admins."""
     if target_date is None:
         target_date = date.today()
-    queue_notification(
-        'daily_sales_report',
-        ADMIN_ID,
-        {'target_date': target_date.isoformat()}
-    )
-    logger.info("Queued daily sales report for %s", target_date)
+    admin_chat_ids = _get_all_admin_chat_ids()
+    payload = {'target_date': target_date.isoformat()}
+    for chat_id in admin_chat_ids:
+        queue_notification('daily_sales_report', chat_id, payload)
+    logger.info("Queued daily sales report for %s to %d admin(s)", target_date, len(admin_chat_ids))
 
 
 # ---------------------------------------------------------------------
@@ -259,11 +378,47 @@ def start_scheduler(bot_token: str):
         misfire_grace_time=86400
     )
 
-    # Daily sales report to admin
+    # Daily sales report to all admins
     scheduler.add_job(
         _safe_job(queue_daily_sales_report),
         trigger=CronTrigger(hour=18, minute=10),
         id='daily_sales_report_admin',
+        replace_existing=True,
+        misfire_grace_time=86400
+    )
+
+    # Monthly profit report (Ethiopian month day 1)
+    scheduler.add_job(
+        _safe_job(queue_monthly_profit_report),
+        trigger=CronTrigger(hour=19, minute=0),
+        id='monthly_profit_report_admin',
+        replace_existing=True,
+        misfire_grace_time=86400
+    )
+
+    # Quarterly profit report (Ethiopian months 1, 4, 7, 10)
+    scheduler.add_job(
+        _safe_job(queue_quarterly_profit_report),
+        trigger=CronTrigger(hour=19, minute=0),
+        id='quarterly_profit_report_admin',
+        replace_existing=True,
+        misfire_grace_time=86400
+    )
+
+    # Semi-annual profit report (Ethiopian months 1, 7)
+    scheduler.add_job(
+        _safe_job(queue_semiannual_profit_report),
+        trigger=CronTrigger(hour=19, minute=0),
+        id='semiannual_profit_report_admin',
+        replace_existing=True,
+        misfire_grace_time=86400
+    )
+
+    # Annual profit report (Ethiopian Meskerem 1)
+    scheduler.add_job(
+        _safe_job(queue_annual_profit_report),
+        trigger=CronTrigger(hour=19, minute=0),
+        id='annual_profit_report_admin',
         replace_existing=True,
         misfire_grace_time=86400
     )

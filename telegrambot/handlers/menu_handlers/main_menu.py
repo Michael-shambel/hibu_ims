@@ -1,12 +1,12 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ContextTypes, ConversationHandler
-from config import ADMIN_ID
 from telegrambot.handlers.menu_handlers.states import (
     ROLE_SELECTION, ADMIN_MENU, TRANSACTION_REPORTS_MENU, SALES_TEAM_AUTH_USERNAME,
     ROLE_ADMIN, ROLE_SALES_TEAM, ROLE_SUPPLIER, ROLE_CUSTOMER,
     CallbackData, ButtonText
 )
 from telegrambot.handlers.menu_handlers.sales_team_auth import start_sales_team_auth
+from telegrambot.handlers.menu_handlers.admin_auth import start_admin_auth
 import logging
 
 logger = logging.getLogger(__name__)
@@ -91,9 +91,18 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer()
         data = query.data
 
-        if update.effective_user.id != ADMIN_ID:
-            await query.edit_message_text("❌ Unauthorized access/❌ ያልተፈቀደ ጥያቄ፡፡")
-            return ConversationHandler.END
+        # Check if user has admin role in context (set during auth flow)
+        user_role = context.user_data.get('user_role')
+        if user_role != ROLE_ADMIN:
+            # Fallback: check DB for this chat_id
+            import asyncio
+            from services.auth_service import AuthService
+            chat_id = update.effective_chat.id
+            auth_svc = AuthService()
+            is_admin = await asyncio.to_thread(auth_svc.is_admin_chat_id, chat_id)
+            if not is_admin:
+                await query.edit_message_text("❌ Unauthorized access/❌ ያልተፈቀደ ጥያቄ፡፡")
+                return ConversationHandler.END
         
         if data == CallbackData.SALES_REPORTS:
             from telegrambot.handlers.menu_handlers.sales_menu import sales_reports_menu
@@ -177,48 +186,8 @@ async def handle_role_selection(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data
 
     if data == CallbackData.ROLE_ADMIN:
-        if update.effective_user.id != ADMIN_ID:
-            await query.edit_message_text(
-                "❌ Unauthorized access/ያልተፈቀደ.\n\n"
-                "❌መግባት ክልክል ነው፡፡\n",
-                parse_mode='Markdown'
-            )
-            keyboard = [
-                [InlineKeyboardButton("👨‍💼 Admin/ባለቤት", callback_data=CallbackData.ROLE_ADMIN)],
-                [InlineKeyboardButton("👔 Store Team/መጋዘን", callback_data=CallbackData.ROLE_SALES_TEAM)],
-                [InlineKeyboardButton("👤 Supplier/አቅራቢ", callback_data=CallbackData.ROLE_SUPPLIER)],
-                [InlineKeyboardButton("👥 Customer/ደንበኛ", callback_data=CallbackData.ROLE_CUSTOMER)],
-                [InlineKeyboardButton("❌ Cancel", callback_data=CallbackData.CANCEL)]
-            ]
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="🔐 Please select your role:\n ማንነትዎን ይምረጡ",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            return ROLE_SELECTION 
-
-        context.user_data['user_role'] = ROLE_ADMIN
-
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="🛠 Admin keyboard activated. Use the buttons below.\n የባለቤት ማቅጫ _ የሚፈልጉትን ሪፖርት አይነት ይምረጡ፤",
-            reply_markup=get_main_keyboard(ROLE_ADMIN)
-        )
-        keyboard = [
-            [InlineKeyboardButton("📊 Sales Reports / ሽያጭ መረጃ", callback_data=CallbackData.SALES_REPORTS)],
-            [InlineKeyboardButton("📦 Product Reports / ንብረት መረጃ", callback_data=CallbackData.PRODUCT_REPORTS)],
-            [InlineKeyboardButton("💰 Credit Report / ዱቤ መረጃ", callback_data=CallbackData.CREDIT_REPORTS)],
-            [InlineKeyboardButton("🏦 Bank Transfer / ባንክ መረጃ", callback_data=CallbackData.BANK_TRANSFER)],
-            [InlineKeyboardButton("💸 Expense Report / ወጪ ሪፖርት", callback_data=CallbackData.EXPENSE_REPORT)],
-            [InlineKeyboardButton("❌ Cancel", callback_data=CallbackData.CANCEL)]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            "📈 Admin Panel - Select report category:\n የባለቤት ማቅጫ _ የሚፈልጉትን ሪፖርት አይነት ይምረጡ፤",
-            reply_markup=reply_markup
-        )
-        return ADMIN_MENU
+        # Redirect to admin auth flow (like sales_team_auth)
+        return await start_admin_auth(update, context)
 
     elif data == CallbackData.ROLE_SALES_TEAM:
         return await start_sales_team_auth(update, context)
@@ -246,9 +215,17 @@ async def handle_role_selection(update: Update, context: ContextTypes.DEFAULT_TY
 def recover_user_role(context: ContextTypes.DEFAULT_TYPE, user_id: int):
     """Recover user role from database if missing in context"""
     try:
-        if user_id == ADMIN_ID:
+        from services.auth_service import AuthService
+        auth_svc = AuthService()
+        # Check if user has a registered chat_id as admin
+        user = auth_svc.get_by_chat_id(user_id)
+        if user and user.role == 'admin' and not user.is_deleted:
             context.user_data['user_role'] = ROLE_ADMIN
             return ROLE_ADMIN
+        # Also check sales_team
+        if user and user.role in ('sales_team', 'sales_clerk') and not user.is_deleted:
+            context.user_data['user_role'] = ROLE_SALES_TEAM
+            return ROLE_SALES_TEAM
         return None
     except Exception as e:
         logger.error(f"❌ Failed to recover user role: {e}")

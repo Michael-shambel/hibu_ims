@@ -235,6 +235,25 @@ class AuthService(BaseService[AuthUser]):
         """Get an admin user (for verification)"""
         with get_session() as session:
             return session.query(AuthUser).filter_by(role="admin", is_deleted=False).first()
+
+    def get_all_admin_chat_ids(self) -> list:
+        """Return chat_ids of all active admin users with registered Telegram."""
+        with get_session() as session:
+            users = session.query(AuthUser.chat_id).filter(
+                AuthUser.role == 'admin',
+                AuthUser.chat_id.isnot(None),
+                AuthUser.is_deleted == False
+            ).all()
+            return [u.chat_id for u in users]
+
+    def is_admin_chat_id(self, chat_id: int) -> bool:
+        """Check if a chat_id belongs to an active admin user."""
+        with get_session() as session:
+            return session.query(AuthUser).filter(
+                AuthUser.chat_id == chat_id,
+                AuthUser.role == 'admin',
+                AuthUser.is_deleted == False
+            ).first() is not None
     
     def update(self, user_id: int, update_data: dict) -> bool:
         """Update user data"""
