@@ -53,12 +53,26 @@ def _get_hardware_fingerprint():
     elif system == "Windows":
         try:
             output = subprocess.check_output(
-                "wmic csproduct get uuid", shell=True, encoding="utf-8"
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance Win32_ComputerSystemProduct).UUID"
+                ],
+                encoding="utf-8",
+                stderr=subprocess.DEVNULL
             ).strip()
-            lines = [line.strip() for line in output.split("\n") if line.strip()]
-            if len(lines) >= 2:
-                uuid_val = lines[1]
-                if uuid_val and uuid_val.upper() != "TO BE FILLED BY O.E.M.":
+
+            uuid_val = output.strip()
+
+            if uuid_val:
+                invalid_values = {
+                    "TO BE FILLED BY O.E.M.",
+                    "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+                    "00000000-0000-0000-0000-000000000000"
+                }
+
+                if uuid_val.upper() not in invalid_values:
                     identifiers.append(uuid_val)
         except Exception:
             pass
@@ -104,13 +118,13 @@ def _extract_machine_id_from_license():
     from cryptography.hazmat.primitives.asymmetric import padding as Padding
 
     PUBLIC_KEY_PEM = b"""-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnPZPUM+c6Ph7eESpgeWZ
-pyCSb9bvX8oIieWr6A1aZpvSHo+26E0Pd3DzUxEOEjhh36UpjPX7DG2rPA9nQHOM
-nQLBhqD8e3jRU8RfxVynsqSh6S4SHOCrygD6isRGiyqeYceYTTpB7fJ4DOHzQ2MY
-34R/D+pfHcF09KLqLlKtSuZ4thM3Wj1ssPi6vOdukCrDh1NrWS6nTiqfT/yBvg5B
-aAmjibsM3lJ0mMsYWY4m2yf7TqviFoKa3+cBdbnFo5ydPmJvg3dk4Zsijn4F0STN
-w8gcIHo9n7XMeixN261we9kHZM6Ha4PMBsDkP00XQbe0paBN+pLFsiqy2N9XH+8p
-MwIDAQAB
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0CaNbl2nf6euujxtk4bg
+js7zWRc2hLurzXYQDvlnPp0ULUee56GMafJb5+jXWE86B1e3oq4W2PvEQtViQWQB
+oJcGYMh8w7kXnb9ynS9BctjS7V+QzKZ69W6wFOg5STUXSUm6sHvKOCu/s0VkLuaj
+s0l2YR2lzin00K/73a2A2d5kYdwGsQaw81Y5T1eQ+b80Hr3xPifWWcASiYrfud2N
+QcoEN76hRInwNElMlpSjxayx+nBlg2ZvZGvV1tjm9GSM/3C81Gckm4DWuFpIZGgp
+79XiTunsqDG1F8xBozBZQVFHCycfBFnQah9aJFdKGrJDN7YaHdZnfC8rlKkspA7w
+TwIDAQAB
 -----END PUBLIC KEY-----"""
 
     try:
