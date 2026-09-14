@@ -265,7 +265,7 @@ def generate_daily_profit_pdf(
     story = []
 
     month_name = ETHIOPIAN_MONTHS[eth_month - 1][0] if 1 <= eth_month <= len(ETHIOPIAN_MONTHS) else str(eth_month)
-    story.append(P("የሽያጭ እና ትርፍ ሪፖርት / Daily Sales & Profit Report", size=16, bold=True, align='C'))
+    story.append(P("ናይ መዓልታዊ ሽያጥን ትርፍን ጸብጻብ / Daily Sales & Profit Report", size=16, bold=True, align='C'))
     story.append(P("%s %d, %d   (Gregorian: %s)" % (month_name, eth_day, eth_year, greg_date.isoformat()),
                    size=11, align='C'))
     story.append(Spacer(1, 6 * mm))
@@ -274,15 +274,15 @@ def generate_daily_profit_pdf(
     margin = (net_profit / total_selling * 100) if total_selling else 0.0
 
     story.append(_summary_table([
-        ("ጠቅላላ ሽያጭ / Total Sales", _money(total_selling)),
-        ("ጠቅላላ ግዢ / Total Cost", _money(total_cost)),
-        ("ወጪ / Expenses", _money(expenses)),
-        ("ንፁህ ትርፍ / Net Profit", _money(net_profit)),
-        ("%ንፁህ ትርፍ / Net Profit %", _pct(margin)),
+        ("ጠቅላላ ሽያጥ / Total Sales", _money(total_selling)),
+        ("ጠቅላላ ዋጋ ግዛእ / Total Cost", _money(total_cost)),
+        ("ወጻኢታት / Expenses", _money(expenses)),
+        ("ንጹህ ትርፊ / Net Profit", _money(net_profit)),
+        ("%ንጹህ ትርፊ / Net Profit %", _pct(margin)),
     ]))
     story.append(Spacer(1, 8 * mm))
 
-    story.append(P("የምርት ዝርዝር / Product Breakdown", size=12, bold=True))
+    story.append(P("ዝርዝር ፍርያት / Product Breakdown", size=12, bold=True))
     story.append(Spacer(1, 2 * mm))
 
     if items:
@@ -317,13 +317,13 @@ def generate_daily_profit_pdf(
             _pct((tot_profit / tot_sell * 100) if tot_sell else 0.0),
         ]
         story.append(_detail_table(
-            ["ስም / Item Name", "ብዛት / Qty", "ግዢ / Cost", "ሽያጭ / Sales", "ትርፍ / Profit", "% ትርፍ / Profit %"],
+            ["ስም / Item Name", "ብዝሒ / Qty", "ዋጋ ግዛእ / Cost", "ሽያጥ / Sales", "ትርፊ / Profit", "% ትርፊ / Profit %"],
             rows,
             [62 * mm, 22 * mm, 40 * mm, 40 * mm, 40 * mm, 34 * mm],
             total_row=total_row,
         ))
     else:
-        story.append(P("በዚህ ቀን ሽያጭ አልተመዘገበም / No sales recorded on this date.", size=10))
+        story.append(P("ኣብዚ መዓልቲ'ዚ ሽያጥ ኣይተመዝገበን / No sales recorded on this date.", size=10))
 
     doc.build(story)
     pdf_bytes = buffer.getvalue()
@@ -345,7 +345,7 @@ def generate_monthly_profit_pdf(
     doc = _doc(buffer)
     story = []
 
-    story.append(P("ወርሃዊ ትርፍ ሪፖርት / Monthly Profit Report", size=16, bold=True, align='C'))
+    story.append(P("ወርሓዊ ጸብጻብ ትርፊ / Monthly Profit Report", size=16, bold=True, align='C'))
     story.append(P(period_label, size=11, align='C'))
     story.append(P(_range_label(start_date, end_date), size=9, align='C'))
     story.append(Spacer(1, 6 * mm))
@@ -363,15 +363,15 @@ def generate_monthly_profit_pdf(
     margin = (tot_net / tot_sell * 100) if tot_sell else 0.0
 
     story.append(_summary_table([
-        ("ጠቅላላ ሽያጭ / Total Sales", _money(tot_sell)),
-        ("ጠቅላላ ግዢ / Total Cost", _money(tot_cost)),
-        ("ወጪ / Expenses", _money(tot_exp)),
-        ("ንፁህ ትርፍ / Net Profit", _money(tot_net)),
-        ("%ንፁህ ትርፍ / Net Profit %", _pct(margin)),
+        ("ጠቅላላ ሽያጥ / Total Sales", _money(tot_sell)),
+        ("ጠቅላላ ዋጋ ግዛእ / Total Cost", _money(tot_cost)),
+        ("ወጻኢታት / Expenses", _money(tot_exp)),
+        ("ንጹህ ትርፊ / Net Profit", _money(tot_net)),
+        ("%ንጹህ ትርፊ / Net Profit %", _pct(margin)),
     ]))
     story.append(Spacer(1, 8 * mm))
 
-    story.append(P("በቀን ዝርዝር / Day-by-Day Details", size=12, bold=True))
+    story.append(P("ብመዓልቲ ዝርዝር / Day-by-Day Details", size=12, bold=True))
     story.append(Spacer(1, 2 * mm))
 
     if daily_data:
@@ -398,14 +398,14 @@ def generate_monthly_profit_pdf(
             _pct(margin),
         ]
         story.append(_detail_table(
-            ["ቀን / Date", "ብዛት / Qty", "ሽያጭ / Selling", "ግዢ / Cost",
-             "ጠቅላላ / Gross", "ወጪ / Expenses", "ትርፍ / Net", "% ትርፍ / Profit %"],
+            ["ዕለት / Date", "ብዝሒ / Qty", "ሽያጥ / Selling", "ዋጋ ግዛእ / Cost",
+             "ሓፈሻዊ / Gross", "ወጻኢ / Expenses", "ትርፊ / Net", "% ትርፊ / Profit %"],
             rows,
             [30 * mm, 18 * mm, 34 * mm, 34 * mm, 34 * mm, 34 * mm, 34 * mm, 28 * mm],
             total_row=total_row,
         ))
     else:
-        story.append(P("ለዚህ ወር መረጃ አልተገኘም / No data available for this period.", size=10))
+        story.append(P("ኣብዚ ወርሒ'ዚ ሓበሬታ ኣይተረኽበን / No data available for this period.", size=10))
 
     doc.build(story)
     pdf_bytes = buffer.getvalue()
@@ -427,7 +427,7 @@ def generate_period_profit_pdf(
     doc = _doc(buffer)
     story = []
 
-    story.append(P("የትርፍ ሪፖርት / Profit Report", size=16, bold=True, align='C'))
+    story.append(P("ጸብጻብ ትርፊ / Profit Report", size=16, bold=True, align='C'))
     story.append(P(period_label, size=11, align='C'))
     story.append(P(_range_label(start_date, end_date), size=9, align='C'))
     story.append(Spacer(1, 6 * mm))
@@ -445,15 +445,15 @@ def generate_period_profit_pdf(
     margin = (tot_net / tot_sell * 100) if tot_sell else 0.0
 
     story.append(_summary_table([
-        ("ጠቅላላ ሽያጭ / Total Sales", _money(tot_sell)),
-        ("ጠቅላላ ግዢ / Total Cost", _money(tot_cost)),
-        ("ወጪ / Expenses", _money(tot_exp)),
-        ("ንፁህ ትርፍ / Net Profit", _money(tot_net)),
-        ("%ንፁህ ትርፍ / Net Profit %", _pct(margin)),
+        ("ጠቅላላ ሽያጥ / Total Sales", _money(tot_sell)),
+        ("ጠቅላላ ዋጋ ግዛእ / Total Cost", _money(tot_cost)),
+        ("ወጻኢታት / Expenses", _money(tot_exp)),
+        ("ንጹህ ትርፊ / Net Profit", _money(tot_net)),
+        ("%ንጹህ ትርፊ / Net Profit %", _pct(margin)),
     ]))
     story.append(Spacer(1, 8 * mm))
 
-    story.append(P("በወር ዝርዝር / Month-by-Month Details", size=12, bold=True))
+    story.append(P("ብወርሒ ዝርዝር / Month-by-Month Details", size=12, bold=True))
     story.append(Spacer(1, 2 * mm))
 
     if monthly_data:
@@ -483,14 +483,14 @@ def generate_period_profit_pdf(
             _pct(margin),
         ]
         story.append(_detail_table(
-            ["ወር / Month", "ብዛት / Qty", "ሽያጭ / Selling", "ግዢ / Cost", "ጠቅላላ / Gross",
-             "ወጪ / Expenses", "ትርፍ / Net", "ለውጥ / Change %", "% ትርፍ / Profit %"],
+            ["ወርሒ / Month", "ብዝሒ / Qty", "ሽያጥ / Selling", "ዋጋ ግዛእ / Cost", "ሓፈሻዊ / Gross",
+             "ወጻኢ / Expenses", "ትርፊ / Net", "ለውጢ / Change %", "% ትርፊ / Profit %"],
             rows,
             [24 * mm, 17 * mm, 32 * mm, 32 * mm, 32 * mm, 32 * mm, 32 * mm, 26 * mm, 26 * mm],
             total_row=total_row,
         ))
     else:
-        story.append(P("ለዚህ ጊዜ መረጃ አልተገኘም / No data available for this period.", size=10))
+        story.append(P("ኣብዚ እዋን'ዚ ሓበሬታ ኣይተረኽበን / No data available for this period.", size=10))
 
     doc.build(story)
     pdf_bytes = buffer.getvalue()

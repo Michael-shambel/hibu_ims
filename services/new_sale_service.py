@@ -1425,32 +1425,27 @@ class NewSaleService(BaseService[ProfessionalSale]):
             return [r[0] for r in results if r[0]]
     
     def get_total_selling_price_for_period(self, start_date: date, end_date: date) -> float:
-        """Sum of (quantity * dozen * unit_price) from sale items."""
-        # from models.new_sale_item import ProfessionalSaleItem
-        # from models.new_sales import ProfessionalSale
-        # from sqlalchemy import func
-        # from datetime import datetime, time
         start_dt = datetime.combine(start_date, time.min)
         end_dt = datetime.combine(end_date, time.max)
         with get_session() as session:
             total = session.query(
                 func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProfessionalSaleItem.unit_price)
+            ).select_from(ProfessionalSaleItem).join(
+                ProductBatch, ProfessionalSaleItem.batch_id == ProductBatch.id
+            ).join(
+                ProfessionalProduct, ProductBatch.product_id == ProfessionalProduct.id
             ).join(
                 ProfessionalSale, ProfessionalSaleItem.sale_id == ProfessionalSale.id
             ).filter(
                 ProfessionalSale.created_at.between(start_dt, end_dt),
                 ProfessionalSale.is_deleted == False,
-                ProfessionalSaleItem.is_deleted == False
+                ProfessionalSaleItem.is_deleted == False,
+                ProductBatch.is_deleted == False,
+                ProfessionalProduct.is_deleted == False
             ).scalar()
             return float(total) if total else 0.0
 
     def get_total_cost_price_for_period(self, start_date: date, end_date: date) -> float:
-        """Sum of (quantity * dozen * batch.cost_price) from sale items."""
-        # from models.new_sale_item import ProfessionalSaleItem
-        # from models.product_batch import ProductBatch
-        # from models.new_sales import ProfessionalSale
-        # from sqlalchemy import func
-        # from datetime import datetime, time
         start_dt = datetime.combine(start_date, time.min)
         end_dt = datetime.combine(end_date, time.max)
         with get_session() as session:
@@ -1459,12 +1454,15 @@ class NewSaleService(BaseService[ProfessionalSale]):
             ).select_from(ProfessionalSaleItem).join(
                 ProductBatch, ProfessionalSaleItem.batch_id == ProductBatch.id
             ).join(
+                ProfessionalProduct, ProductBatch.product_id == ProfessionalProduct.id
+            ).join(
                 ProfessionalSale, ProfessionalSaleItem.sale_id == ProfessionalSale.id
             ).filter(
                 ProfessionalSale.created_at.between(start_dt, end_dt),
                 ProfessionalSale.is_deleted == False,
                 ProfessionalSaleItem.is_deleted == False,
-                ProductBatch.is_deleted == False
+                ProductBatch.is_deleted == False,
+                ProfessionalProduct.is_deleted == False
             ).scalar()
             return float(total) if total else 0.0
     
