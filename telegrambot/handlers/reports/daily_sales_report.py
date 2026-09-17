@@ -50,6 +50,7 @@ def daily_report_pdf(data: dict, target_date: date) -> bytes:
     return generate_daily_profit_pdf(
         data['total_selling'], data['total_cost'], data['expenses'],
         data['items'], eth_year, eth_month, eth_day, target_date,
+        data.get('expense_breakdown', []),
     )
 
 

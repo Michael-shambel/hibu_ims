@@ -401,3 +401,78 @@ class ExpenseService(BaseService[Expense]):
                 Expense.is_personal == True
             ).scalar()
             return float(total) if total else 0.0
+    
+    def get_expenses_by_category_breakdown(self, start_date: date, end_date: date, business_only: bool = True) -> list:
+        """Get expense totals grouped by category for a date range."""
+        from sqlalchemy import func
+        from models.expense_category import ExpenseCategory
+        with get_session() as session:
+            query = session.query(
+                Expense.category_id,
+                ExpenseCategory.name.label('category_name'),
+                func.sum(Expense.amount).label('total_amount'),
+                func.count(Expense.id).label('count')
+            ).join(
+                ExpenseCategory, Expense.category_id == ExpenseCategory.id
+            ).filter(
+                Expense.date >= start_date,
+                Expense.date <= end_date,
+                Expense.is_deleted == False
+            )
+            if business_only:
+                query = query.filter(Expense.is_personal == False)
+            
+            results = query.group_by(
+                Expense.category_id,
+                ExpenseCategory.name
+            ).order_by(
+                func.sum(Expense.amount).desc()
+            ).all()
+            
+            breakdown = []
+            for row in results:
+                breakdown.append({
+                    'category_id': row.category_id,
+                    'category_name': row.category_name,
+                    'total_amount': float(row.total_amount) if row.total_amount else 0.0,
+                    'count': int(row.count) if row.count else 0,
+                })
+            return breakdown
+
+    def get_expense_details_by_category(self, start_date: date, end_date: date, business_only: bool = True) -> list:
+        """Get individual expense entries grouped by category with notes for detailed breakdown."""
+        with get_session() as session:
+            query = session.query(Expense).options(
+                joinedload(Expense.category)
+            ).filter(
+                Expense.date >= start_date,
+                Expense.date <= end_date,
+                Expense.is_deleted == False
+            )
+            if business_only:
+                query = query.filter(Expense.is_personal == False)
+            
+            expenses = query.order_by(Expense.category_id, Expense.date).all()
+            
+            # Group by category
+            categories = {}
+            for exp in expenses:
+                cat_name = exp.category.name if exp.category else 'Unknown'
+                if cat_name not in categories:
+                    categories[cat_name] = {
+                        'category_name': cat_name,
+                        'total_amount': 0.0,
+                        'count': 0,
+                        'items': []
+                    }
+                categories[cat_name]['total_amount'] += exp.amount
+                categories[cat_name]['count'] += 1
+                categories[cat_name]['items'].append({
+                    'notes': exp.notes or '',
+                    'amount': exp.amount,
+                    'date': exp.date
+                })
+            
+            # Convert to sorted list
+            result = sorted(categories.values(), key=lambda x: x['total_amount'], reverse=True)
+            return result

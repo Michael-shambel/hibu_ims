@@ -247,7 +247,60 @@ def _doc(buffer):
 
 
 # ---------------------------------------------------------------------------
-# 1. Daily Profit PDF — summary box + product breakdown table
+# Expense Breakdown Table Generator
+# ---------------------------------------------------------------------------
+def _expense_breakdown_table(expense_breakdown: list, total_expenses: float) -> Table:
+    """Generate a table showing individual expense entries with notes."""
+    header_labels = ["የወጪ ዓይነት / Expense Type", "ማብራሪያ / Notes", "መጠን ብር / Amount", "% ወጪ / % of Expenses"]
+    col_widths = [50 * mm, 80 * mm, 40 * mm, 30 * mm]
+    
+    rows = []
+    total_count = 0
+    for item in expense_breakdown:
+        category_name = item.get('category_name', 'Unknown')
+        items = item.get('items', [])
+        
+        if items:
+            # Show each individual expense entry as its own row
+            for exp_item in items:
+                pct = (exp_item.get('amount', 0) / total_expenses * 100) if total_expenses > 0 else 0.0
+                rows.append([
+                    category_name,
+                    exp_item.get('notes', ''),
+                    _money(exp_item.get('amount', 0)),
+                    _pct(pct),
+                ])
+                total_count += 1
+        else:
+            # Fallback for aggregated data without individual items
+            pct = (item.get('total_amount', 0) / total_expenses * 100) if total_expenses > 0 else 0.0
+            rows.append([
+                category_name,
+                '',
+                _money(item.get('total_amount', 0)),
+                _pct(pct),
+            ])
+            total_count += item.get('count', 0)
+    
+    # Add total row
+    total_row = [
+        "ጠቅላላ / TOTAL",
+        "",
+        _money(total_expenses),
+        "100.0%",
+    ]
+    
+    return _detail_table(
+        header_labels,
+        rows,
+        col_widths,
+        total_row=total_row,
+        aligns=['L', 'L', 'R', 'R']
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1. Daily Profit PDF — summary box + product breakdown table + expense breakdown
 # ---------------------------------------------------------------------------
 def generate_daily_profit_pdf(
     total_selling: float,
@@ -258,14 +311,15 @@ def generate_daily_profit_pdf(
     eth_month: int,
     eth_day: int,
     greg_date: date,
+    expense_breakdown: list = None,
 ) -> bytes:
-    """Daily report: summary box + per-product breakdown."""
+    """Daily report: summary box + per-product breakdown + expense breakdown."""
     buffer = io.BytesIO()
     doc = _doc(buffer)
     story = []
 
     month_name = ETHIOPIAN_MONTHS[eth_month - 1][0] if 1 <= eth_month <= len(ETHIOPIAN_MONTHS) else str(eth_month)
-    story.append(P("ናይ መዓልታዊ ሽያጥን ትርፍን ጸብጻብ / Daily Sales & Profit Report", size=16, bold=True, align='C'))
+    story.append(P("የቀን ሽያጭ እና ትርፍ ሪፖርት / Daily Sales & Profit Report", size=16, bold=True, align='C'))
     story.append(P("%s %d, %d   (Gregorian: %s)" % (month_name, eth_day, eth_year, greg_date.isoformat()),
                    size=11, align='C'))
     story.append(Spacer(1, 6 * mm))
@@ -274,15 +328,15 @@ def generate_daily_profit_pdf(
     margin = (net_profit / total_selling * 100) if total_selling else 0.0
 
     story.append(_summary_table([
-        ("ጠቅላላ ሽያጥ / Total Sales", _money(total_selling)),
-        ("ጠቅላላ ዋጋ ግዛእ / Total Cost", _money(total_cost)),
-        ("ወጻኢታት / Expenses", _money(expenses)),
-        ("ንጹህ ትርፊ / Net Profit", _money(net_profit)),
-        ("%ንጹህ ትርፊ / Net Profit %", _pct(margin)),
+        ("ጠቅላላ ሽያጭ / Total Sales", _money(total_selling)),
+        ("ጠቅላላ ግዥ / Total Cost", _money(total_cost)),
+        ("ወጪ / Expenses", _money(expenses)),
+        ("ንጹህ ትርፍ / Net Profit", _money(net_profit)),
+        ("%ንጹህ ትርፍ / Net Profit %", _pct(margin)),
     ]))
     story.append(Spacer(1, 8 * mm))
 
-    story.append(P("ዝርዝር ፍርያት / Product Breakdown", size=12, bold=True))
+    story.append(P("ዝርዝር ምርቶች / Product Breakdown", size=12, bold=True))
     story.append(Spacer(1, 2 * mm))
 
     if items:
@@ -317,13 +371,20 @@ def generate_daily_profit_pdf(
             _pct((tot_profit / tot_sell * 100) if tot_sell else 0.0),
         ]
         story.append(_detail_table(
-            ["ስም / Item Name", "ብዝሒ / Qty", "ዋጋ ግዛእ / Cost", "ሽያጥ / Sales", "ትርፊ / Profit", "% ትርፊ / Profit %"],
+            ["ስም / Item Name", "ብዛት / Qty", "ዋጋ / Cost", "ሽያጭ / Sales", "ትርፍ / Profit", "% ትርፍ / Profit %"],
             rows,
             [62 * mm, 22 * mm, 40 * mm, 40 * mm, 40 * mm, 34 * mm],
             total_row=total_row,
         ))
     else:
-        story.append(P("ኣብዚ መዓልቲ'ዚ ሽያጥ ኣይተመዝገበን / No sales recorded on this date.", size=10))
+        story.append(P("በዚህ ቀን ሽያጭ አልተመዝገበም / No sales recorded on this date.", size=10))
+
+    # Add expense breakdown table if we have data
+    if expense_breakdown and expenses > 0:
+        story.append(Spacer(1, 8 * mm))
+        story.append(P("የወጪ አይነቶች / Expense Breakdown by Category", size=12, bold=True))
+        story.append(Spacer(1, 2 * mm))
+        story.append(_expense_breakdown_table(expense_breakdown, expenses))
 
     doc.build(story)
     pdf_bytes = buffer.getvalue()
@@ -332,7 +393,7 @@ def generate_daily_profit_pdf(
 
 
 # ---------------------------------------------------------------------------
-# 2. Monthly Profit PDF — day-by-day table
+# 2. Monthly Profit PDF — day-by-day table + individual daily expense tables
 # ---------------------------------------------------------------------------
 def generate_monthly_profit_pdf(
     period_label: str,
@@ -340,12 +401,12 @@ def generate_monthly_profit_pdf(
     end_date: date,
     daily_data: list,
 ) -> bytes:
-    """Monthly report: day-by-day breakdown for a single Ethiopian month."""
+    """Monthly report: day-by-day breakdown + individual expense tables for each day."""
     buffer = io.BytesIO()
     doc = _doc(buffer)
     story = []
 
-    story.append(P("ወርሓዊ ጸብጻብ ትርፊ / Monthly Profit Report", size=16, bold=True, align='C'))
+    story.append(P("ወርሃዊ ትርፍ ሪፖርት / Monthly Profit Report", size=16, bold=True, align='C'))
     story.append(P(period_label, size=11, align='C'))
     story.append(P(_range_label(start_date, end_date), size=9, align='C'))
     story.append(Spacer(1, 6 * mm))
@@ -363,15 +424,15 @@ def generate_monthly_profit_pdf(
     margin = (tot_net / tot_sell * 100) if tot_sell else 0.0
 
     story.append(_summary_table([
-        ("ጠቅላላ ሽያጥ / Total Sales", _money(tot_sell)),
-        ("ጠቅላላ ዋጋ ግዛእ / Total Cost", _money(tot_cost)),
-        ("ወጻኢታት / Expenses", _money(tot_exp)),
-        ("ንጹህ ትርፊ / Net Profit", _money(tot_net)),
-        ("%ንጹህ ትርፊ / Net Profit %", _pct(margin)),
+        ("ጠቅላላ ሽያጭ / Total Sales", _money(tot_sell)),
+        ("ጠቅላላ ግዥ / Total Cost", _money(tot_cost)),
+        ("ወጪ / Expenses", _money(tot_exp)),
+        ("ንጹህ ትርፍ / Net Profit", _money(tot_net)),
+        ("%ንጹህ ትርፍ / Net Profit %", _pct(margin)),
     ]))
     story.append(Spacer(1, 8 * mm))
 
-    story.append(P("ብመዓልቲ ዝርዝር / Day-by-Day Details", size=12, bold=True))
+    story.append(P("በቀን ዝርዝር / Day-by-Day Details", size=12, bold=True))
     story.append(Spacer(1, 2 * mm))
 
     if daily_data:
@@ -398,14 +459,28 @@ def generate_monthly_profit_pdf(
             _pct(margin),
         ]
         story.append(_detail_table(
-            ["ዕለት / Date", "ብዝሒ / Qty", "ሽያጥ / Selling", "ዋጋ ግዛእ / Cost",
-             "ሓፈሻዊ / Gross", "ወጻኢ / Expenses", "ትርፊ / Net", "% ትርፊ / Profit %"],
+            ["ቀን / Date", "ብዛት / Qty", "ሽያጭ / Selling", "ዋጋ / Cost",
+             "ጠቅላላ ትርፍ / Gross", "ወጪ / Expenses", "ንጹህ / Net", "% ትርፍ / Profit %"],
             rows,
             [30 * mm, 18 * mm, 34 * mm, 34 * mm, 34 * mm, 34 * mm, 34 * mm, 28 * mm],
             total_row=total_row,
         ))
     else:
-        story.append(P("ኣብዚ ወርሒ'ዚ ሓበሬታ ኣይተረኽበን / No data available for this period.", size=10))
+        story.append(P("በዚህ ወር መረጃ አልተገኘም / No data available for this period.", size=10))
+
+    # Add individual expense tables for each day that has expenses
+    from reportlab.platypus import PageBreak
+    for d in daily_data:
+        day_expenses = d.get('expenses', 0)
+        day_breakdown = d.get('expense_breakdown', [])
+        if day_breakdown and day_expenses > 0:
+            story.append(PageBreak())
+            story.append(P("የወጪ ዝርዝር / Expense Details - %s" % _eth_date_str(d['date']), size=14, bold=True, align='C'))
+            story.append(P("(Gregorian: %s)" % d['date'].isoformat(), size=10, align='C'))
+            story.append(Spacer(1, 6 * mm))
+            story.append(P("ጠቅላላ ወጪ / Total Expenses: %s" % _money(day_expenses), size=11, bold=True))
+            story.append(Spacer(1, 4 * mm))
+            story.append(_expense_breakdown_table(day_breakdown, day_expenses))
 
     doc.build(story)
     pdf_bytes = buffer.getvalue()
@@ -414,7 +489,7 @@ def generate_monthly_profit_pdf(
 
 
 # ---------------------------------------------------------------------------
-# 3. Period Profit PDF — month-by-month table (3 / 6 / 12 months)
+# 3. Period Profit PDF — month-by-month table (3 / 6 / 12 months) + individual monthly expense tables
 # ---------------------------------------------------------------------------
 def generate_period_profit_pdf(
     period_label: str,
@@ -422,12 +497,12 @@ def generate_period_profit_pdf(
     end_date: date,
     monthly_data: list,
 ) -> bytes:
-    """Quarterly / semi-annual / annual report: month-by-month breakdown."""
+    """Quarterly / semi-annual / annual report: month-by-month breakdown + individual monthly expense tables."""
     buffer = io.BytesIO()
     doc = _doc(buffer)
     story = []
 
-    story.append(P("ጸብጻብ ትርፊ / Profit Report", size=16, bold=True, align='C'))
+    story.append(P("የትርፍ ሪፖርት / Profit Report", size=16, bold=True, align='C'))
     story.append(P(period_label, size=11, align='C'))
     story.append(P(_range_label(start_date, end_date), size=9, align='C'))
     story.append(Spacer(1, 6 * mm))
@@ -445,15 +520,15 @@ def generate_period_profit_pdf(
     margin = (tot_net / tot_sell * 100) if tot_sell else 0.0
 
     story.append(_summary_table([
-        ("ጠቅላላ ሽያጥ / Total Sales", _money(tot_sell)),
-        ("ጠቅላላ ዋጋ ግዛእ / Total Cost", _money(tot_cost)),
-        ("ወጻኢታት / Expenses", _money(tot_exp)),
-        ("ንጹህ ትርፊ / Net Profit", _money(tot_net)),
-        ("%ንጹህ ትርፊ / Net Profit %", _pct(margin)),
+        ("ጠቅላላ ሽያጭ / Total Sales", _money(tot_sell)),
+        ("ጠቅላላ ግዥ / Total Cost", _money(tot_cost)),
+        ("ወጪ / Expenses", _money(tot_exp)),
+        ("ንጹህ ትርፍ / Net Profit", _money(tot_net)),
+        ("%ንጹህ ትርፍ / Net Profit %", _pct(margin)),
     ]))
     story.append(Spacer(1, 8 * mm))
 
-    story.append(P("ብወርሒ ዝርዝር / Month-by-Month Details", size=12, bold=True))
+    story.append(P("በወር ዝርዝር / Month-by-Month Details", size=12, bold=True))
     story.append(Spacer(1, 2 * mm))
 
     if monthly_data:
@@ -483,14 +558,32 @@ def generate_period_profit_pdf(
             _pct(margin),
         ]
         story.append(_detail_table(
-            ["ወርሒ / Month", "ብዝሒ / Qty", "ሽያጥ / Selling", "ዋጋ ግዛእ / Cost", "ሓፈሻዊ / Gross",
-             "ወጻኢ / Expenses", "ትርፊ / Net", "ለውጢ / Change %", "% ትርፊ / Profit %"],
+            ["ወር / Month", "ብዛት / Qty", "ሽያጭ / Selling", "ዋጋ / Cost", "ጠቅላላ ትርፍ / Gross",
+             "ወጪ / Expenses", "ንጹህ / Net", "ለውጢ / Change %", "% ትርፍ / Profit %"],
             rows,
             [24 * mm, 17 * mm, 32 * mm, 32 * mm, 32 * mm, 32 * mm, 32 * mm, 26 * mm, 26 * mm],
             total_row=total_row,
         ))
     else:
-        story.append(P("ኣብዚ እዋን'ዚ ሓበሬታ ኣይተረኽበን / No data available for this period.", size=10))
+        story.append(P("በዚህ ጊዜ መረጃ አልተገኘም / No data available for this period.", size=10))
+
+    # Add individual expense tables for each month that has expenses
+    from reportlab.platypus import PageBreak
+    for m in monthly_data:
+        month_expenses = m.get('expenses', 0)
+        month_breakdown = m.get('expense_breakdown', [])
+        if month_breakdown and month_expenses > 0:
+            story.append(PageBreak())
+            # Get Ethiopian month name for the label
+            month_idx = m.get('month', 1)
+            month_name = ETHIOPIAN_MONTHS[month_idx - 1][0] if 1 <= month_idx <= len(ETHIOPIAN_MONTHS) else str(month_idx)
+            eth_year = m.get('year', '')
+            story.append(P("የወጪ ዝርዝር / Expense Details - %s %d" % (month_name, eth_year), size=14, bold=True, align='C'))
+            story.append(P("(Gregorian: %s to %s)" % (m['start'].isoformat(), m['end'].isoformat()), size=10, align='C'))
+            story.append(Spacer(1, 6 * mm))
+            story.append(P("ጠቅላላ ወጪ / Total Expenses: %s" % _money(month_expenses), size=11, bold=True))
+            story.append(Spacer(1, 4 * mm))
+            story.append(_expense_breakdown_table(month_breakdown, month_expenses))
 
     doc.build(story)
     pdf_bytes = buffer.getvalue()
@@ -526,7 +619,7 @@ def _get_carton_quantity_for_period(sale_svc, start_date: date, end_date: date) 
 
 
 def build_daily_profit_data(target_date: date) -> dict:
-    """Summary + per-product rows for one day."""
+    """Summary + per-product rows + expense breakdown for one day."""
     from services.expense_service import ExpenseService
     from services.new_sale_service import NewSaleService
 
@@ -538,11 +631,14 @@ def build_daily_profit_data(target_date: date) -> dict:
         'total_cost': sale_svc.get_total_cost_price_for_period(target_date, target_date),
         'expenses': expense_svc.get_total_expenses_for_period(target_date, target_date),
         'items': sale_svc.get_product_profit_breakdown(target_date, target_date),
+        'expense_breakdown': expense_svc.get_expense_details_by_category(
+            target_date, target_date
+        ),
     }
 
 
 def build_monthly_profit_data(start_date: date, end_date: date) -> list:
-    """Day-by-day rows covering [start_date, end_date]."""
+    """Day-by-day rows + expense breakdown covering [start_date, end_date]."""
     from services.expense_service import ExpenseService
     from services.new_sale_service import NewSaleService
 
@@ -566,6 +662,9 @@ def build_monthly_profit_data(start_date: date, end_date: date) -> list:
             'expenses': exp,
             'net_profit': net,
             'margin': (net / selling * 100) if selling else 0.0,
+            'expense_breakdown': expense_svc.get_expense_details_by_category(
+                current, current
+            ),
         })
         current += timedelta(days=1)
     return data
@@ -596,7 +695,7 @@ def _ethiopian_months_between(start_date: date, end_date: date):
 
 
 def build_period_profit_data(start_date: date, end_date: date) -> list:
-    """Month-by-month rows for the Ethiopian months inside [start_date, end_date]."""
+    """Month-by-month rows + expense breakdown for the Ethiopian months inside [start_date, end_date]."""
     from services.expense_service import ExpenseService
     from services.new_sale_service import NewSaleService
 
@@ -623,6 +722,9 @@ def build_period_profit_data(start_date: date, end_date: date) -> list:
             'margin': (net / selling * 100) if selling else 0.0,
             'year': yr,
             'month': mn,
+            'expense_breakdown': expense_svc.get_expense_details_by_category(
+                m_start, m_end
+            ),
         })
 
     month_data.sort(key=lambda x: (x['year'], x['month']))
