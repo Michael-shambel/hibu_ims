@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import logging
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QScrollArea,
     QFrame, QLabel, QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView,
@@ -10,10 +12,13 @@ from models.expense import ExpensePaymentMethod
 from services.expense_category_service import ExpenseCategoryService
 from services.bank_account_service import BankAccountService
 from services.expense_service import ExpenseService
+from services.product_group_service import ProductGroupService
 from ui.pages.product_dialog import (
     ModernDoubleSpinBox, ModernComboBox, ModernTextEdit, ModernInput
 )
 from ui.components.ethiopian_date import EthiopianDateEdit
+
+logger = logging.getLogger(__name__)
 
 
 # ---------- NumberLineEdit (comma formatting, no dollar sign) ----------
@@ -110,6 +115,7 @@ class ExpenseDialog(QDialog):
         self.category_service = ExpenseCategoryService()
         self.bank_service = BankAccountService()
         self.expense_service = ExpenseService()
+        self.group_service = ProductGroupService()
 
         self.setWindowFlags(
             Qt.Window |
@@ -162,13 +168,17 @@ class ExpenseDialog(QDialog):
         section_layout.setContentsMargins(25, 20, 25, 20)
         section_layout.setSpacing(12)
 
-        # Row 1: Bank Account & Category (horizontal, equal width)
+        # Row 1: Bank Account, Category & Product Group (horizontal, equal width)
         bank_cat_row = QHBoxLayout()
         self.bank_combo = ModernComboBox("Bank Account")
         self.bank_combo.setEnabled(True)
         bank_cat_row.addWidget(self.bank_combo, 1)
         self.category_combo = ModernComboBox("Category")
         bank_cat_row.addWidget(self.category_combo, 1)
+        # Optional: tags this expense to a product group so it appears in that
+        # group's product specific reports.
+        self.group_combo = ModernComboBox("Product Group")
+        bank_cat_row.addWidget(self.group_combo, 1)
         section_layout.addLayout(bank_cat_row)
 
         # Row 2: Notes & Amount (50/50)
@@ -399,6 +409,18 @@ class ExpenseDialog(QDialog):
             self.category_combo.addItem(cat.name, cat.id)
             self.category_display_map[cat.id] = cat.name
 
+        self.load_product_groups()
+
+    def load_product_groups(self):
+        """Fill the optional product-group picker (used by scoped reports)."""
+        self.group_combo.clear()
+        self.group_combo.addItem("-- No Group --", None)
+        try:
+            for group in self.group_service.list_groups(active_only=True):
+                self.group_combo.addItem(group.name, group.id)
+        except Exception:
+            logger.exception("Failed to load product groups for the expense dialog")
+
     def populate_fields(self):
         if self.expense:
             self.amount_spin.setText(f"{self.expense.amount:,.2f}")
@@ -415,6 +437,11 @@ class ExpenseDialog(QDialog):
                     self.category_combo.setCurrentIndex(idx)
             
             self.personal_checkbox.setChecked(bool(self.expense.is_personal))
+
+            group_id = getattr(self.expense, "product_group_id", None)
+            idx = self.group_combo.findData(group_id)
+            if idx >= 0:
+                self.group_combo.setCurrentIndex(idx)
 
             self.notes_edit.setPlainText(getattr(self.expense, "notes", "") or "")
 
@@ -446,7 +473,8 @@ class ExpenseDialog(QDialog):
             "bank_name": bank_name,
             "category_id": cat_id,
             "category_name": cat_name,
-            "is_personal": self.personal_checkbox.isChecked()
+            "is_personal": self.personal_checkbox.isChecked(),
+            "product_group_id": self.group_combo.currentData(),
         }
         self.expense_lines.append(line)
 
@@ -508,7 +536,8 @@ class ExpenseDialog(QDialog):
                 'category_id': line['category_id'],
                 'bank_account_id': line['bank_account_id'],
                 'notes': line['notes'],
-                'is_personal': line.get('is_personal', False)
+                'is_personal': line.get('is_personal', False),
+                'product_group_id': line.get('product_group_id')
             })
         return common, lines
 
@@ -539,7 +568,8 @@ class ExpenseDialog(QDialog):
             'date': self.date_edit.date().toPython(),
             'description': "Expense",
             'category_id': self.category_combo.currentData(),
-            'is_personal': self.personal_checkbox.isChecked()
+            'is_personal': self.personal_checkbox.isChecked(),
+            'product_group_id': self.group_combo.currentData()
         }
         self.accept()
     

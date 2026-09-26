@@ -17,7 +17,7 @@ def get_main_keyboard(role=ROLE_CUSTOMER):
         return ReplyKeyboardMarkup([
             [ButtonText.SALES_REPORTS, ButtonText.PRODUCT_REPORTS],
             [ButtonText.CREDIT_REPORT, ButtonText.BANK_TRANSFER],
-            [ButtonText.START_MENU, ButtonText.CANCEL]
+            [ButtonText.REPORT_SUBSCRIPTION, ButtonText.START_MENU, ButtonText.CANCEL]
         ], resize_keyboard=True, is_persistent=True)
     elif role == ROLE_SALES_TEAM:
         return ReplyKeyboardMarkup([
@@ -119,6 +119,9 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         elif data == CallbackData.EXPENSE_REPORT:
             from telegrambot.handlers.menu_handlers.expense_menu import expense_menu_entry
             return await expense_menu_entry(update, context)  # <-- was expense_menu_handler
+        elif data == CallbackData.REPORT_SUBSCRIPTION:
+            from telegrambot.handlers.menu_handlers.subscription_menu import report_subscription_menu
+            return await report_subscription_menu(update, context)
         elif data == CallbackData.CANCEL:
             await query.edit_message_text("❌ Cancelled. Send /start to begin again.\n ተቋርጧል። እንደገና ለማስጀመር /start ይንኩ።")
             return ConversationHandler.END
@@ -153,6 +156,9 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             elif text == ButtonText.BANK_TRANSFER:
                 from telegrambot.handlers.menu_handlers.bank_menu import bank_menu_handler
                 return await bank_menu_handler(update, context)
+            elif text == ButtonText.REPORT_SUBSCRIPTION:
+                from telegrambot.handlers.menu_handlers.subscription_menu import report_subscription_menu
+                return await report_subscription_menu(update, context)
             elif text == ButtonText.BACK_TO_ADMIN:
                 # Already in admin menu, but if user typed it manually
                 await update.message.reply_text(
@@ -164,6 +170,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     [InlineKeyboardButton("📦 Product Reports", callback_data=CallbackData.PRODUCT_REPORTS)],
                     [InlineKeyboardButton("💰 Credit Report", callback_data=CallbackData.CREDIT_REPORTS)],
                     [InlineKeyboardButton("🏦 Bank Transfer", callback_data=CallbackData.BANK_TRANSFER)],
+                    [InlineKeyboardButton("🔔 Report Subscription", callback_data=CallbackData.REPORT_SUBSCRIPTION)],
                     [InlineKeyboardButton("❌ Cancel", callback_data=CallbackData.CANCEL)]
                 ]
                 await update.message.reply_text(
@@ -243,6 +250,10 @@ async def handle_persistent_buttons(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("Bye! Send /start to restart.\n ቻው! እንደገና ለማስጀመር /start ይንኩ።", reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
     
+    elif text == ButtonText.REPORT_SUBSCRIPTION:
+        from telegrambot.handlers.menu_handlers.subscription_menu import report_subscription_menu
+        return await report_subscription_menu(update, context)
+
     elif text == ButtonText.BACK_TO_ADMIN:
         # Check if user is admin
         user_role = context.user_data.get('user_role')
@@ -258,6 +269,7 @@ async def handle_persistent_buttons(update: Update, context: ContextTypes.DEFAUL
                 [InlineKeyboardButton("💰 Credit Report / ዱቤ መረጃ", callback_data=CallbackData.CREDIT_REPORTS)],
                 [InlineKeyboardButton("🏦 Bank Transfer / ባንክ መረጃ", callback_data=CallbackData.BANK_TRANSFER)],
                 [InlineKeyboardButton("💸 Expense Report / ወጪ ሪፖርት", callback_data=CallbackData.EXPENSE_REPORT)],
+                [InlineKeyboardButton("🔔 Report Subscription / ሪፖርት ደንበኝነት", callback_data=CallbackData.REPORT_SUBSCRIPTION)],
                 [InlineKeyboardButton("❌ Cancel", callback_data=CallbackData.CANCEL)]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)

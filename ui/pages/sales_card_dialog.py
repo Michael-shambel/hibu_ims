@@ -20,7 +20,7 @@ from services.new_product_service import NewProductService
 from ui.utils.worker import Worker
 from telegrambot.bot import notify_store_team_sync, is_bot_ready
 from ui.pages.expense_overview_dialog import ExpenseOverviewDialog
-from fidel import Transliterate
+from services.amharic_service import to_amharic as convert_to_amharic
 import re
 import difflib
 from typing import Tuple, Optional
@@ -1535,8 +1535,6 @@ class SaleItemsDialog(QDialog):
         self.table.resizeRowsToContents()
 
 class DespatchSalesDialog(QDialog):
-    AMHARIC_OVERRIDES = {}
-
     def __init__(self, parent, title, sales, current_user, is_despatched):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -1968,18 +1966,7 @@ class DespatchSalesDialog(QDialog):
 
     def _to_amharic(self, text: str) -> str:
         """Convert product name to Amharic. Never raises exceptions."""
-        if not text:
-            return text
-        key = text.strip().upper()
-        if key in self.AMHARIC_OVERRIDES:
-            return self.AMHARIC_OVERRIDES[key]
-        try:
-            processed = text.lower().strip()
-            cleaned = re.sub(r'\s+', ' ', processed)
-            amharic = Transliterate(cleaned).transliterate()
-            return amharic if amharic else text
-        except Exception:
-            return text
+        return convert_to_amharic(text)
 
     def _send_despatch_notification(self, sale, extra_text: str = None):
         """Send a despatch confirmation message to the store team using the same Amharic format as new sales."""

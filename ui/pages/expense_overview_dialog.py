@@ -68,7 +68,8 @@ class ExpenseOverviewDialog(QDialog):
         card_info = [
             ("Total Expenses", "$0.00", "#e74c3c"),
             ("Number of Transactions", "0", "#3498db"),
-            ("Average per Day", "$0.00", "#f39c12")
+            ("Average per Day", "$0.00", "#f39c12"),
+            ("Tagged to Groups", "$0.00", "#8e44ad")
         ]
         for title, value, color in card_info:
             card = self._create_summary_card(title, value, color)
@@ -123,20 +124,17 @@ class ExpenseOverviewDialog(QDialog):
         self.expense_tab = QWidget()
         tab1_layout = QVBoxLayout(self.expense_tab)
         self.table = QTableWidget()
-        headers = ["ID", "Date (Ethiopian)", "Category", "Amount", "Payment Method", "Bank Account", "Notes", "Actions"]
+        headers = ["ID", "Date (Ethiopian)", "Category", "Product Group", "Amount", "Payment Method", "Bank Account", "Notes", "Actions"]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setColumnHidden(0, True)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        for col in range(0, 6):
+            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.Stretch)
-        header.setSectionResizeMode(7, QHeaderView.Fixed)
-        self.table.setColumnWidth(7, 120) 
+        header.setSectionResizeMode(7, QHeaderView.Stretch)
+        header.setSectionResizeMode(8, QHeaderView.Fixed)
+        self.table.setColumnWidth(8, 120) 
 
         self.table.setAlternatingRowColors(True)
         
@@ -176,14 +174,15 @@ class ExpenseOverviewDialog(QDialog):
         self.analysis_tab = QWidget()
         tab2_layout = QVBoxLayout(self.analysis_tab)
         self.category_table = QTableWidget()
-        cat_headers = ["Category", "Total Amount", "Percentage", "Visual"]
+        cat_headers = ["Category", "Product Group", "Total Amount", "Percentage", "Visual"]
         self.category_table.setColumnCount(len(cat_headers))
         self.category_table.setHorizontalHeaderLabels(cat_headers)
         cat_header = self.category_table.horizontalHeader()
         cat_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         cat_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         cat_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        cat_header.setSectionResizeMode(3, QHeaderView.Stretch)
+        cat_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        cat_header.setSectionResizeMode(4, QHeaderView.Stretch)
         
         self.category_table.setAlternatingRowColors(True)
         
@@ -300,7 +299,8 @@ class ExpenseOverviewDialog(QDialog):
         with get_session() as session:
             query = session.query(Expense).options(
                 joinedload(Expense.category),
-                joinedload(Expense.bank_account)
+                joinedload(Expense.bank_account),
+                joinedload(Expense.product_group)
             ).filter(
                 Expense.is_deleted == False
             )
@@ -355,7 +355,8 @@ class ExpenseOverviewDialog(QDialog):
         with get_session() as session:
             query = session.query(Expense).options(
                 joinedload(Expense.category),
-                joinedload(Expense.bank_account)
+                joinedload(Expense.bank_account),
+                joinedload(Expense.product_group)
             ).filter(
                 Expense.is_deleted == False,
                 Expense.date >= start_date,
@@ -386,9 +387,22 @@ class ExpenseOverviewDialog(QDialog):
             avg_per_day = 0.0
 
         # Update summary cards
+        # How much of the total is tagged to a product group. Scoped (product
+        # specific) reports only ever see tagged expenses, so this card is the
+        # quickest way to spot costs that will be missing from those reports.
+        tagged_amount = sum(e.amount for e in self.expenses if e.product_group_id)
+        tagged_share = (tagged_amount / total_amount * 100) if total_amount else 0.0
+
         self.summary_cards["Total Expenses"].findChild(QLabel, "value_label").setText(f"${total_amount:,.2f}")
         self.summary_cards["Number of Transactions"].findChild(QLabel, "value_label").setText(str(count))
         self.summary_cards["Average per Day"].findChild(QLabel, "value_label").setText(f"${avg_per_day:,.2f}")
+        tagged_label = self.summary_cards["Tagged to Groups"].findChild(QLabel, "value_label")
+        tagged_label.setText(f"${tagged_amount:,.2f}")
+        tagged_label.setToolTip(
+            f"{tagged_share:.1f}% of the ${total_amount:,.2f} shown is tagged to a product group.\n"
+            "Untagged expenses appear in full (company-wide) reports only, never in "
+            "product specific reports."
+        )
 
         self.populate_table()
         self.populate_category_analysis()
@@ -433,19 +447,36 @@ class ExpenseOverviewDialog(QDialog):
             cat_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             self.table.setItem(row, 2, cat_item)
 
-            # Amount (col 3)
+            # Product Group tag (col 3) - which group this expense is reported to
+            group_name = exp.product_group.name if exp.product_group else None
+            group_item = QTableWidgetItem(group_name if group_name else "— not tagged")
+            group_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            if group_name:
+                group_item.setForeground(QColor("#8e44ad"))
+                group_item.setToolTip(
+                    f"Reported only in '{group_name}' product specific reports."
+                )
+            else:
+                group_item.setForeground(QColor("#95a5a6"))
+                group_item.setToolTip(
+                    "Not tagged to a product group: shown in full (company-wide) "
+                    "reports only."
+                )
+            self.table.setItem(row, 3, group_item)
+
+            # Amount (col 4)
             amount_item = QTableWidgetItem(f"${exp.amount:,.2f}")
             amount_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             amount_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.table.setItem(row, 3, amount_item)
+            self.table.setItem(row, 4, amount_item)
 
-            # Payment Method (col 4)
+            # Payment Method (col 5)
             payment_method = exp.payment_method.value.capitalize() if exp.payment_method else "N/A"
             payment_item = QTableWidgetItem(payment_method)
             payment_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
-            self.table.setItem(row, 4, payment_item)
+            self.table.setItem(row, 5, payment_item)
 
-            # Bank Account (col 5)
+            # Bank Account (col 6)
             bank_display = ""
             if exp.bank_account:
                 bank_display = f"{exp.bank_account.bank_name} - {exp.bank_account.account_name}"
@@ -453,16 +484,16 @@ class ExpenseOverviewDialog(QDialog):
                     bank_display += f" ({exp.bank_account.account_number[-4:]})"
             bank_item = QTableWidgetItem(bank_display)
             bank_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
-            self.table.setItem(row, 5, bank_item)
+            self.table.setItem(row, 6, bank_item)
 
-            # Notes (col 6)
+            # Notes (col 7)
             notes_item = QTableWidgetItem(exp.notes or "")
             notes_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
-            self.table.setItem(row, 6, notes_item)
+            self.table.setItem(row, 7, notes_item)
 
-            # Actions (col 7) - Create buttons
+            # Actions (col 8) - Create buttons
             actions_widget = self.create_action_buttons(exp)
-            self.table.setCellWidget(row, 7, actions_widget)
+            self.table.setCellWidget(row, 8, actions_widget)
 
         self.table.resizeRowsToContents()
     
@@ -566,11 +597,12 @@ class ExpenseOverviewDialog(QDialog):
                 QMessageBox.critical(self, "Error", f"Failed to delete expense: {str(e)}")
 
     def populate_category_analysis(self):
-        """Group expenses by category, compute totals and percentages, show with visual bar."""
+        """Group expenses by category and product group, compute totals/percentages."""
         category_totals = defaultdict(float)
         for exp in self.expenses:
             cat_name = exp.category.name if exp.category else "Uncategorized"
-            category_totals[cat_name] += exp.amount
+            group_name = exp.product_group.name if exp.product_group else "— not tagged"
+            category_totals[(cat_name, group_name)] += exp.amount
 
         total = sum(category_totals.values())
         if total == 0:
@@ -578,41 +610,60 @@ class ExpenseOverviewDialog(QDialog):
             no_data_item = QTableWidgetItem("No expenses in this period")
             no_data_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             self.category_table.setItem(0, 0, no_data_item)
-            
+
+            no_group_item = QTableWidgetItem("—")
+            no_group_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            self.category_table.setItem(0, 1, no_group_item)
+
             amount_item = QTableWidgetItem("$0.00")
             amount_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             amount_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.category_table.setItem(0, 1, amount_item)
-            
+            self.category_table.setItem(0, 2, amount_item)
+
             percent_item = QTableWidgetItem("0%")
             percent_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             percent_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.category_table.setItem(0, 2, percent_item)
+            self.category_table.setItem(0, 3, percent_item)
             return
 
         # Sort by total descending
         sorted_cats = sorted(category_totals.items(), key=lambda x: x[1], reverse=True)
         self.category_table.setRowCount(len(sorted_cats))
 
-        for row, (cat_name, amount) in enumerate(sorted_cats):
+        for row, ((cat_name, group_name), amount) in enumerate(sorted_cats):
             percentage = (amount / total) * 100
 
             # Category name
             cat_item = QTableWidgetItem(cat_name)
             cat_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             self.category_table.setItem(row, 0, cat_item)
-            
+
+            # Product group this slice of the category is reported to
+            group_item = QTableWidgetItem(group_name)
+            group_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            if group_name == "— not tagged":
+                group_item.setForeground(QColor("#95a5a6"))
+                group_item.setToolTip(
+                    "Company-wide reports only, never in product specific reports."
+                )
+            else:
+                group_item.setForeground(QColor("#8e44ad"))
+                group_item.setToolTip(
+                    f"Reported only in '{group_name}' product specific reports."
+                )
+            self.category_table.setItem(row, 1, group_item)
+
             # Amount
             amount_item = QTableWidgetItem(f"${amount:,.2f}")
             amount_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             amount_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.category_table.setItem(row, 1, amount_item)
-            
+            self.category_table.setItem(row, 2, amount_item)
+
             # Percentage
             percent_item = QTableWidgetItem(f"{percentage:.1f}%")
             percent_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             percent_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.category_table.setItem(row, 2, percent_item)
+            self.category_table.setItem(row, 3, percent_item)
 
             # Visual progress bar
             progress = QProgressBar()
@@ -630,10 +681,10 @@ class ExpenseOverviewDialog(QDialog):
                     border-radius: 4px;
                 }
             """)
-            self.category_table.setCellWidget(row, 3, progress)
+            self.category_table.setCellWidget(row, 4, progress)
 
         self.category_table.resizeRowsToContents()
-        self.category_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.category_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
     
     def on_business_only_toggled(self):
         """Reload data using the current mode (all or filtered)."""

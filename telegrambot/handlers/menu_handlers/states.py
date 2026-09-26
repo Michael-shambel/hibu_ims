@@ -36,6 +36,7 @@ class ConversationStates(IntEnum):
     EXPENSE_NOTES_ENTRY = 31
     ADMIN_AUTH_USERNAME = 32
     ADMIN_AUTH_PASSWORD = 33
+    REPORT_SUBSCRIPTION_MENU = 34
 
 
 # Update the tuple - change range from 17 to 18
@@ -48,7 +49,7 @@ class ConversationStates(IntEnum):
  BANK_TRANSFER_FROM_ACCOUNT, BANK_TRANSFER_TO_ACCOUNT, BANK_TRANSFER_AMOUNT, BANK_TRANSFER_REASON,
  BANK_TRANSFER_EXTERNAL_PAYEE, EXPENSE_MENU, EXPENSE_TYPE_SELECTION, EXPENSE_BANK_ACCOUNT_SELECTION,
  EXPENSE_CATEGORY_SELECTION, EXPENSE_AMOUNT_ENTRY, EXPENSE_NOTES_ENTRY,
- ADMIN_AUTH_USERNAME, ADMIN_AUTH_PASSWORD) = range(34)
+ ADMIN_AUTH_USERNAME, ADMIN_AUTH_PASSWORD, REPORT_SUBSCRIPTION_MENU) = range(35)
 
 
 # Role constants for consistent usage
@@ -109,6 +110,13 @@ class CallbackData:
 
     EXPENSE_REPORT = "expense_report"
     RECORD_EXPENSE = "record_expense"
+
+    # Report subscription (product specific reports)
+    REPORT_SUBSCRIPTION = "report_subscription"
+    SUB_FULL_REPORT = "sub_full_report"
+    SUB_PARTIAL_REPORT = "sub_partial_report"
+    SUB_TOGGLE_GROUP = "sub_group_"
+    SUB_TOGGLE_TYPE = "sub_type_"
     EXPENSE_TYPE_BUSINESS = "expense_type_business"
     EXPENSE_TYPE_PERSONAL = "expense_type_personal"
     
@@ -124,6 +132,7 @@ class ButtonText:
     PRODUCT_REPORTS = "📦 Product Reports"
     CREDIT_REPORT = "💰 Credit Report"
     BANK_TRANSFER = "🏦 Bank Transfer"
+    REPORT_SUBSCRIPTION = "🔔 Report Subscription"
 
 ETHIOPIAN_MONTHS = [
     ("መስከረም", "01"),

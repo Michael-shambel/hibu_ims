@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDate, QLocale, QTimer
 from PySide6.QtGui import QDoubleValidator, QFont
 from services.bank_account_service import BankAccountService
+from services.bank_transaction_service import BankTransactionService
 from services.new_sale_service import NewSaleService
 from services.purchase_service import PurchaseService
 from ui.components.ethiopian_date import EthiopianDateEdit
@@ -456,6 +457,13 @@ class CreditPaymentDialog(QDialog):
             if not success:
                 error_msg = "Failed to record sale payment."
         else:
+            # Pre-check that the chosen bank account(s) can actually cover the
+            # payments, so the user is told WHICH bank is short and can top it
+            # up with a deposit before we attempt to record the payment.
+            shortfalls = self.purchase_service.get_payment_balance_shortfalls(payments)
+            if shortfalls:
+                self._handle_insufficient_balances(shortfalls)
+                return
             success, error_msg = self.purchase_service.record_supplier_payment(
                 self.customer_id, payments, user_id, note, payment_date
             )
@@ -470,3 +478,68 @@ class CreditPaymentDialog(QDialog):
             self.accept()
         else:
             QMessageBox.critical(self, "Payment Failed", error_msg or "Failed to record payment.")
+
+    def _handle_insufficient_balances(self, shortfalls):
+        """Warn the user naming every short bank account and offer to record a
+        deposit into the first short account so it can be topped up in place."""
+        details = "\n\n".join(
+            f"• {s['bank_display']}\n"
+            f"    Balance: ETB {s['balance']:,.2f}  |  Required: ETB {s['needed']:,.2f}"
+            for s in shortfalls
+        )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Insufficient Bank Balance")
+        box.setText(
+            "The selected bank account(s) do not have enough balance for this payment:\n\n"
+            f"{details}\n\n"
+            "Record a deposit into the account now, then the payment will be attempted again."
+        )
+        deposit_btn = box.addButton("💰 Record Deposit", QMessageBox.ActionRole)
+        cancel_btn = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(deposit_btn)
+        box.exec()
+        if box.clickedButton() != deposit_btn:
+            return
+        first = shortfalls[0]
+        if self._open_deposit_dialog(first['bank_id'], first['shortfall']):
+            # Re-run the whole save: any remaining short account (e.g. when the
+            # payment spans several banks) is reported again so the user can
+            # keep topping up or cancel.
+            self.save_payment()
+
+    def _open_deposit_dialog(self, bank_id, shortfall):
+        """Open the same 'Record Deposit' dialog used on the Reports page,
+        preselected to the short bank account with the shortfall prefilled.
+
+        Returns True when a deposit was recorded successfully.
+        """
+        from ui.pages.deposit_dialog import DepositDialog
+
+        dlg = DepositDialog(
+            self,
+            preselect_bank_id=bank_id,
+            suggested_amount=max(shortfall, 0.0),
+            title="Record Deposit – Top Up Bank Balance",
+        )
+        if not dlg.exec():
+            return False
+        data = dlg.get_data()
+        if not data['amount'] or data['amount'] <= 0:
+            return False
+        tx = BankTransactionService().create_external_deposit(
+            to_account_id=data['account_id'],
+            amount=data['amount'],
+            transaction_date=date.today(),
+            source=data['source'] or "Bank deposit",
+            description=data['description'],
+        )
+        if not tx:
+            QMessageBox.critical(self, "Error", "Failed to record deposit.")
+            return False
+        QMessageBox.information(
+            self, "Deposit Recorded",
+            f"Deposit of ETB {data['amount']:,.2f} recorded.\n"
+            "The payment is now being attempted again."
+        )
+        return True

@@ -7,7 +7,7 @@ import re
 from datetime import date
 import time
 import logging
-from fidel import Transliterate
+from services.amharic_service import to_amharic as convert_to_amharic
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QPushButton, QTableWidget, QTableWidgetItem,
@@ -434,8 +434,6 @@ class CompactSummaryWidget(QWidget):
 
 class SalesManager(QWidget):
     """load_products_combo showEvent"""
-    
-    AMHARIC_OVERRIDES = {}
     
     def __init__(self, current_user=None):
         super().__init__()
@@ -3159,20 +3157,7 @@ class SalesManager(QWidget):
     
     def _to_amharic(self, text: str) -> str:
         """Convert product name to Amharic. Never raises exceptions."""
-        if not text:
-            return text
-
-        key = text.strip().upper()
-        if key in self.AMHARIC_OVERRIDES:
-            return self.AMHARIC_OVERRIDES[key]
-
-        try:
-            processed = text.lower().strip()
-            cleaned = re.sub(r'\s+', ' ', processed)
-            amharic = Transliterate(cleaned).transliterate()
-            return amharic if amharic else text
-        except Exception:
-            return text
+        return convert_to_amharic(text)
     
     def _send_order_notification(self, sale, items, sale_date=None, original_sale_id=None):
         try:

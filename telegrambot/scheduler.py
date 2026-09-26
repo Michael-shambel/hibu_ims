@@ -20,8 +20,11 @@ from utils import backup_database, get_backup_dir
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
-DATABASE_BACKUP_HOUR = 18
-DATABASE_BACKUP_MINUTE = 10
+# Database backups run twice a day. Any slot missed because the app/PC was off
+# is replayed by startup_backup_catchup() on the next launch.
+DATABASE_BACKUP_SLOTS = ((13, 0), (18, 0))
+DATABASE_BACKUP_HOURS = ','.join(str(hour) for hour, _ in DATABASE_BACKUP_SLOTS)
+DATABASE_BACKUP_MINUTES = ','.join(sorted({str(minute) for _, minute in DATABASE_BACKUP_SLOTS}))
 
 
 # -------------------------------------------------------------------------
@@ -55,6 +58,31 @@ def _get_all_admin_chat_ids() -> list:
 
 
 # ---------------------------------------------------------------------
+# Helper: resolve report recipients (product-scoped subscribers + admins)
+# ---------------------------------------------------------------------
+def _get_report_recipients(report_type: str) -> list:
+    """
+    Recipients of `report_type`, each carrying its own product scope.
+
+    A subscriber limited to product groups gets `product_ids`/`group_ids`;
+    everyone else (including admins with no subscription row) gets the full
+    company report. Falls back to ADMIN_ID when nothing can be resolved, which
+    keeps the pre-feature behaviour on an empty database.
+    """
+    from services.report_subscription_service import (
+        ReportSubscriptionService, full_recipient,
+    )
+    try:
+        recipients = ReportSubscriptionService().get_recipients(report_type)
+        if recipients:
+            return recipients
+        logger.warning("No recipients found for '%s', falling back to ADMIN_ID", report_type)
+    except Exception as e:
+        logger.warning("Could not resolve recipients for '%s': %s", report_type, e)
+    return [full_recipient(ADMIN_ID)]
+
+
+# ---------------------------------------------------------------------
 # Profit Report (periodic — daily / monthly / quarterly / semiannual / annual)
 # ---------------------------------------------------------------------
 async def queue_profit_report(
@@ -63,17 +91,21 @@ async def queue_profit_report(
     start_date: date,
     end_date: date,
 ):
-    """Queue a profit report PDF to all registered admins."""
-    admin_chat_ids = _get_all_admin_chat_ids()
-    payload = {
-        'period_type': period_type,
-        'period_label': period_label,
-        'start_date': start_date.isoformat(),
-        'end_date': end_date.isoformat(),
-    }
-    for chat_id in admin_chat_ids:
-        queue_notification('profit_report', chat_id, payload)
-    logger.info("Queued %s profit report to %d admin(s)", period_type, len(admin_chat_ids))
+    """Queue a profit report PDF to every subscriber, scoped to their products."""
+    recipients = _get_report_recipients(period_type)
+    for recipient in recipients:
+        payload = {
+            'period_type': period_type,
+            'period_label': period_label,
+            'start_date': start_date.isoformat(),
+            'end_date': end_date.isoformat(),
+            'scope': recipient.to_payload(),
+        }
+        queue_notification('profit_report', recipient.chat_id, payload)
+    logger.info(
+        "Queued %s profit report to %d recipient(s) (%d scoped)",
+        period_type, len(recipients), sum(1 for r in recipients if not r.is_full),
+    )
 
 
 # --- Pure Ethiopian-calendar helpers (unit-testable, no side effects) ---
@@ -185,14 +217,20 @@ async def queue_annual_profit_report():
 # Daily Sales Report (sent to all admins)
 # ---------------------------------------------------------------------
 async def queue_daily_sales_report(target_date: date = None):
-    """Queue a daily sales report for the given date (default today) to all admins."""
+    """Queue a daily sales report for the given date (default today), scoped per recipient."""
     if target_date is None:
         target_date = date.today()
-    admin_chat_ids = _get_all_admin_chat_ids()
-    payload = {'target_date': target_date.isoformat()}
-    for chat_id in admin_chat_ids:
-        queue_notification('daily_sales_report', chat_id, payload)
-    logger.info("Queued daily sales report for %s to %d admin(s)", target_date, len(admin_chat_ids))
+    recipients = _get_report_recipients('daily')
+    for recipient in recipients:
+        payload = {
+            'target_date': target_date.isoformat(),
+            'scope': recipient.to_payload(),
+        }
+        queue_notification('daily_sales_report', recipient.chat_id, payload)
+    logger.info(
+        "Queued daily sales report for %s to %d recipient(s) (%d scoped)",
+        target_date, len(recipients), sum(1 for r in recipients if not r.is_full),
+    )
 
 
 # ---------------------------------------------------------------------
@@ -335,23 +373,31 @@ async def queue_daily_database_backup():
     """Create a daily backup of the active SQLite database."""
     backup_file = await asyncio.to_thread(backup_database)
     logger.info("Created database backup at %s", backup_file)
+    # Offsite copy: the outbox uploads the file to the admin on Telegram.
+    queue_notification('database_backup', ADMIN_ID, {'file_path': str(backup_file)})
 
 
 async def startup_backup_catchup():
-    """Create today's backup on startup if the scheduled run was missed."""
-    now = datetime.now()
-    scheduled_time = now.replace(hour=DATABASE_BACKUP_HOUR, minute=DATABASE_BACKUP_MINUTE, second=0, microsecond=0)
+    """Create any backups missed while the app was closed.
 
-    if now < scheduled_time:
+    Count-based rather than "is today's backup present": a PC that was off
+    across both slots must produce both backups on the next launch, not just
+    recover the latest one.
+    """
+    now = datetime.now()
+    slots_due = sum(
+        1 for hour, minute in DATABASE_BACKUP_SLOTS
+        if now >= now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    )
+    if slots_due == 0:
         return
 
     backup_dir = Path(get_backup_dir())
     today_prefix = now.strftime('%Y%m%d')
     existing_backups = list(backup_dir.glob(f'db_backup_{today_prefix}_*.db'))
-    if existing_backups:
-        return
 
-    await queue_daily_database_backup()
+    for _ in range(max(0, slots_due - len(existing_backups))):
+        await queue_daily_database_backup()
 
 
 # ---------------------------------------------------------------------
@@ -423,10 +469,10 @@ def start_scheduler(bot_token: str):
         misfire_grace_time=86400
     )
 
-    # Daily database backup
+    # Database backups (13:00 and 18:00) - each one is also sent to the admin
     scheduler.add_job(
         _safe_job(queue_daily_database_backup),
-        trigger=CronTrigger(hour=DATABASE_BACKUP_HOUR, minute=DATABASE_BACKUP_MINUTE),
+        trigger=CronTrigger(hour=DATABASE_BACKUP_HOURS, minute=DATABASE_BACKUP_MINUTES),
         id='daily_database_backup',
         replace_existing=True,
         misfire_grace_time=86400

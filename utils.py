@@ -151,6 +151,14 @@ def backup_database(db_name='inventory.db', source_path=None, backup_dir=None, m
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     backup_file = backup_base / f'db_backup_{timestamp}.db'
+    # Two slots replayed by the startup catch-up land in the same second; a
+    # same-named file would overwrite the first snapshot (and its notification
+    # would be de-duplicated), so suffix the name to keep every backup its own
+    # file.
+    counter = 0
+    while backup_file.exists():
+        counter += 1
+        backup_file = backup_base / f'db_backup_{timestamp}_{counter}.db'
     shutil.copy2(source, backup_file)
     _prune_old_backups(backup_base, max_backups=max_backups)
     return str(backup_file)

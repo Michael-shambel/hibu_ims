@@ -121,6 +121,10 @@ async def credit_reports_text_handler(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("Returning to main menu...\nወደ ዋናው እየተመለሰ...", reply_markup=ReplyKeyboardRemove())
         return await start(update, context)
 
+    elif text == ButtonText.REPORT_SUBSCRIPTION:
+        from telegrambot.handlers.menu_handlers.subscription_menu import report_subscription_menu
+        return await report_subscription_menu(update, context)
+
     else:
         await update.message.reply_text("Please use the buttons below to navigate.\nየታችኛውን በተን ይጠቀሙ")
         return CREDIT_REPORTS_MENU

@@ -1,6 +1,9 @@
 import logging
 import json
 import asyncio
+import os
+import re
+import zipfile
 from datetime import datetime, timedelta
 from io import BytesIO
 
@@ -18,6 +21,10 @@ logger = logging.getLogger(__name__)
 _FAST_SEND_TIMEOUT = 60.0          # order_notification, admin alerts
 _REPORT_SEND_TIMEOUT = 240.0       # PDF reports (was 60.0)
 
+# Telegram's Bot API rejects document uploads over 50 MB. Keep a small margin
+# so a request is never sent only to be rejected.
+_MAX_TELEGRAM_DOCUMENT_MB = 49
+
 REPORT_NOTIFICATION_TYPES = {
     'daily_sales_report',
     'supplier_summary',
@@ -26,6 +33,7 @@ REPORT_NOTIFICATION_TYPES = {
     'customer_summary_admin',
     'shipment_approval_report',
     'profit_report',
+    'database_backup',
 }
 
 # ---------------------------------------------------------------------
@@ -57,20 +65,37 @@ DEDUP_TYPES = {
     'despatch_notification',
     'sale_cancellation',
     'purchase_notification',
+    'database_backup',
 }
+
+def _scope_signature(payload: dict):
+    """
+    Fingerprint of a report's product scope, so two scopes of the same period
+    are treated as different reports (and a scope change cannot be swallowed by
+    an older dedup key).
+    """
+    scope = payload.get('scope') or {}
+    product_ids = scope.get('product_ids')
+    if product_ids is None:
+        products_key = 'all'
+    else:
+        products_key = ','.join(str(p) for p in sorted(product_ids))
+    return (products_key, tuple(int(g) for g in (scope.get('group_ids') or [])))
+
 
 def _get_dedup_key(notification_type: str, payload: dict, chat_id: int):
     if notification_type not in DEDUP_TYPES:
         return None
 
     if notification_type == 'daily_sales_report':
-        return ('daily_sales_report', payload.get('target_date'))
+        return ('daily_sales_report', payload.get('target_date'), _scope_signature(payload))
 
     elif notification_type == 'monthly_profit_report':
         return ('monthly_profit_report', payload.get('eth_year'), payload.get('eth_month'))
 
     elif notification_type == 'profit_report':
-        return ('profit_report', payload.get('period_type'), payload.get('start_date'), payload.get('end_date'))
+        return ('profit_report', payload.get('period_type'), payload.get('start_date'),
+                payload.get('end_date'), _scope_signature(payload))
 
     elif notification_type in ('customer_summary', 'customer_summary_admin'):
         sale_id = payload.get('sale_id')
@@ -110,6 +135,9 @@ def _get_dedup_key(notification_type: str, payload: dict, chat_id: int):
 
     elif notification_type == 'shipment_approval_report':
         return (notification_type, payload.get('shipment_id'))
+
+    elif notification_type == 'database_backup':
+        return ('database_backup', payload.get('file_path'))
 
     return None
 
@@ -383,6 +411,9 @@ async def _dispatch_notification(bot: Bot, nt: str, chat_id: int, payload: dict,
     elif nt == 'profit_report':
         await _send_profit_report(bot, chat_id, payload, notif_id)
 
+    elif nt == 'database_backup':
+        await _send_database_backup(bot, chat_id, payload)
+
     else:
         raise ValueError(f"Unknown notification type: {nt}")
 
@@ -398,33 +429,39 @@ async def _send_generic_message(bot: Bot, chat_id: int, payload: dict):
 # Daily Sales Report
 # ---------------------------------------------------------------------
 async def _send_daily_sales_report(bot: Bot, chat_id: int, payload: dict, notif_id: int):
-    """Send daily sales & profit PDF to a single chat."""
+    """Send daily sales & profit PDF to a single chat, scoped to its products."""
     from telegrambot.handlers.reports.daily_sales_report import (
         daily_report_data, daily_report_caption, daily_report_pdf, daily_report_filename,
     )
+    from services.report_subscription_service import scope_from_payload
 
     target_date = datetime.strptime(payload['target_date'], '%Y-%m-%d').date()
+    scope = scope_from_payload(payload.get('scope'))
+    product_ids = scope['product_ids']
+    group_ids = scope['group_ids']
+    scope_label = scope['label']
     sent_steps = set(payload.get('_sent_steps', []))
 
     # Step 1: Build data (all DB work off the event loop)
-    data = await asyncio.to_thread(daily_report_data, target_date)
+    data = await asyncio.to_thread(daily_report_data, target_date, product_ids, group_ids)
 
     # Step 2: Text message
     if 'text' not in sent_steps:
         await _safe_send_message(
             bot, chat_id,
-            text=daily_report_caption(data, target_date),
+            text=daily_report_caption(data, target_date, scope_label),
             parse_mode='Markdown', timeout=_REPORT_SEND_TIMEOUT
         )
         await asyncio.to_thread(_mark_step_done, notif_id, 'text')
 
     # Step 3: PDF document
     if 'document' not in sent_steps:
-        pdf_bytes = await asyncio.to_thread(daily_report_pdf, data, target_date)
+        pdf_bytes = await asyncio.to_thread(
+            daily_report_pdf, data, target_date, scope_label)
         await _safe_send_document(
             bot, chat_id,
             document=BytesIO(pdf_bytes),
-            filename=daily_report_filename(target_date),
+            filename=daily_report_filename(target_date, scope_label),
             timeout=_REPORT_SEND_TIMEOUT
         )
         await asyncio.to_thread(_mark_step_done, notif_id, 'document')
@@ -774,24 +811,34 @@ async def _send_customer_summary_admin(bot: Bot, chat_id: int, payload: dict, no
 # Profit Report (periodic — daily/monthly/quarterly/semi-annual/annual)
 # ---------------------------------------------------------------------
 async def _send_profit_report(bot: Bot, chat_id: int, payload: dict, notif_id: int):
-    """Send a periodic profit report PDF to a single chat."""
+    """Send a periodic profit report PDF to a single chat, scoped to its products."""
     from datetime import date as date_cls
     from telegrambot.handlers.reports.profit_report import (
         generate_monthly_profit_pdf, generate_period_profit_pdf,
         build_monthly_profit_data, build_period_profit_data,
+        build_period_product_breakdown,
+    )
+    from services.report_subscription_service import (
+        scope_from_payload, scope_filename_tag,
     )
 
     period_type = payload['period_type']       # 'daily', 'monthly', 'quarterly', 'semiannual', 'annual'
     period_label = payload['period_label']     # e.g. 'Monthly Profit Report', '3-Month Profit Report'
     start_date = date_cls.fromisoformat(payload['start_date'])
     end_date = date_cls.fromisoformat(payload['end_date'])
+    scope = scope_from_payload(payload.get('scope'))
+    product_ids = scope['product_ids']
+    group_ids = scope['group_ids']
+    scope_label = scope['label']
     sent_steps = set(payload.get('_sent_steps', []))
 
     # Step 1: Text message
     if 'text' not in sent_steps:
+        scope_line = f"🎯 *Scope:* {scope_label}\n" if scope_label else ""
         caption = (
             f"📊 *{period_label}*\n"
             f"📅 {start_date.strftime('%d/%m/%Y')} – {end_date.strftime('%d/%m/%Y')}\n"
+            f"{scope_line}"
             f"📄 PDF report attached below."
         )
         await _safe_send_message(bot, chat_id, text=caption, parse_mode='Markdown', timeout=_REPORT_SEND_TIMEOUT)
@@ -806,20 +853,114 @@ async def _send_profit_report(bot: Bot, chat_id: int, payload: dict, notif_id: i
                 from telegrambot.handlers.reports.daily_sales_report import (
                     daily_report_data, daily_report_pdf,
                 )
-                return daily_report_pdf(daily_report_data(start_date), start_date)
+                return daily_report_pdf(
+                    daily_report_data(start_date, product_ids, group_ids),
+                    start_date, scope_label,
+                )
             elif period_type == 'monthly':
-                data = build_monthly_profit_data(start_date, end_date)
-                return generate_monthly_profit_pdf(period_label, start_date, end_date, data)
+                data = build_monthly_profit_data(start_date, end_date, product_ids, group_ids)
+                # Scoped periodic reports add a product table of their own.
+                items = None
+                if product_ids is not None:
+                    items = build_period_product_breakdown(start_date, end_date, product_ids)
+                return generate_monthly_profit_pdf(
+                    period_label, start_date, end_date, data, items, scope_label)
             else:   # quarterly, semiannual, annual
-                data = build_period_profit_data(start_date, end_date)
-                return generate_period_profit_pdf(period_label, start_date, end_date, data)
+                data = build_period_profit_data(start_date, end_date, product_ids, group_ids)
+                items = None
+                if product_ids is not None:
+                    items = build_period_product_breakdown(start_date, end_date, product_ids)
+                return generate_period_profit_pdf(
+                    period_label, start_date, end_date, data, items, scope_label)
 
         pdf_bytes = await asyncio.to_thread(_build_pdf)
         filename_label = period_type.replace(' ', '_')
+        tag = scope_filename_tag(scope_label)
+        filename = (f"{filename_label}_profit_{tag}_{end_date}.pdf" if tag
+                    else f"{filename_label}_profit_{end_date}.pdf")
         await _safe_send_document(
             bot, chat_id,
             document=BytesIO(pdf_bytes),
-            filename=f"{filename_label}_profit_{end_date}.pdf",
+            filename=filename,
             timeout=_REPORT_SEND_TIMEOUT
         )
         await asyncio.to_thread(_mark_step_done, notif_id, 'document')
+
+
+# ---------------------------------------------------------------------
+# Database Backup (zipped copy of the .db, uploaded to the admin)
+# ---------------------------------------------------------------------
+def _zip_backup(file_path: str) -> bytes:
+    """Compress a database backup into an in-memory .zip.
+
+    SQLite files are mostly text and index pages, so deflate shrinks them
+    several times over. That keeps the Telegram upload small even as the
+    database grows, and leaves the raw .db untouched on disk for a direct
+    local restore.
+    """
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        zf.write(file_path, arcname=os.path.basename(file_path))
+    return buffer.getvalue()
+
+
+async def _send_database_backup(bot: Bot, chat_id: int, payload: dict):
+    """Upload a zipped database backup to the admin.
+
+    This is the offsite copy: if the PC is lost or its disk fails, the most
+    recent snapshot is still recoverable from the Telegram chat.
+    """
+    file_path = payload.get('file_path')
+    if not file_path or not os.path.exists(file_path):
+        raise FileNotFoundError(f"Backup file not found: {file_path}")
+
+    db_name = os.path.basename(file_path)
+    raw_mb = os.path.getsize(file_path) / (1024 * 1024)
+
+    # Report when the snapshot was TAKEN, not when it was uploaded - a retry
+    # can deliver it hours after the fact.
+    taken_at = datetime.now()
+    match = re.match(r'db_backup_(\d{8})_(\d{6})', db_name)
+    if match:
+        try:
+            taken_at = datetime.strptime(match.group(1) + match.group(2), '%Y%m%d%H%M%S')
+        except ValueError:
+            pass
+
+    # Compression is CPU-bound - keep it off the event loop.
+    zipped = await asyncio.to_thread(_zip_backup, file_path)
+    zip_mb = len(zipped) / (1024 * 1024)
+
+    if zip_mb > _MAX_TELEGRAM_DOCUMENT_MB:
+        # Never fail silently here - the admin must know the offsite copy stopped.
+        logger.error(
+            "Backup %s compresses to %.1f MB, over Telegram's %d MB limit; sending a warning instead",
+            file_path, zip_mb, _MAX_TELEGRAM_DOCUMENT_MB
+        )
+        await _safe_send_message(
+            bot, chat_id,
+            text=(
+                f"⚠️ *Database backup is too large for Telegram*\n"
+                f"📦 {zip_mb:.1f} MB zipped from {raw_mb:.1f} MB "
+                f"(limit: {_MAX_TELEGRAM_DOCUMENT_MB} MB)\n"
+                f"💾 A local copy was saved on the PC as `{db_name}`.\n"
+                f"Please copy it off the machine manually."
+            ),
+            parse_mode='Markdown',
+            timeout=_FAST_SEND_TIMEOUT
+        )
+        return
+
+    await _safe_send_document(
+        bot, chat_id,
+        document=BytesIO(zipped),
+        filename=f"{db_name}.zip",
+        caption=(
+            f"🗄 *Database backup*\n"
+            f"📅 {taken_at.strftime('%d/%m/%Y %H:%M')}\n"
+            f"📦 {zip_mb:.1f} MB (from {raw_mb:.1f} MB)\n"
+            f"⬇️ Unzip to get `{db_name}`, then restore it as `inventory.db`."
+        ),
+        parse_mode='Markdown',
+        timeout=_REPORT_SEND_TIMEOUT
+    )

@@ -3,7 +3,7 @@
 import logging
 from models.expense import Expense, ExpensePaymentMethod
 from services.base_service import BaseService, get_session
-from typing import Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple
 from models.bank_transactions import TransactionDirectionEnum, PaymentMethodEnum
 from models.bank_transactions import BankTransaction
 from services.bank_transaction_service import BankTransactionService
@@ -12,6 +12,19 @@ from datetime import date
 from sqlalchemy.orm import joinedload
 
 logger = logging.getLogger(__name__)
+
+
+def _normalise_group_ids(product_group_ids):
+    """
+    Normalise an expense product-group scope.
+
+    Returns None for 'all business expenses' (full report, today's behaviour) and
+    a set otherwise, so an empty set means 'expenses: none' rather than 'all'.
+    """
+    if product_group_ids is None:
+        return None
+    return {int(g) for g in product_group_ids}
+
 
 class ExpenseService(BaseService[Expense]):
     def __init__(self):
@@ -169,7 +182,9 @@ class ExpenseService(BaseService[Expense]):
                         'bank_account_id': line['bank_account_id'],
                         'notes': line.get('notes'),
                         'user_id': common.get('user_id'),
-                        'is_personal': line.get('is_personal', False)
+                        'is_personal': line.get('is_personal', False),
+                        # Optional product-group tag for product specific reports
+                        'product_group_id': line.get('product_group_id')
                     }
                     expense = Expense(**expense_data)
                     session.add(expense)
@@ -207,7 +222,15 @@ class ExpenseService(BaseService[Expense]):
                 logger.error(f"Failed to create multiple expenses: {e}")
                 return False
     
-    def get_total_expenses_for_period(self, start_date: date, end_date: date, business_only: bool = True) -> float:
+    def get_total_expenses_for_period(self, start_date: date, end_date: date, business_only: bool = True,
+                                      product_group_ids=None) -> float:
+        """
+        Total expenses in the period.
+
+        `product_group_ids=None` keeps the company-wide behaviour (every business
+        expense). A collection restricts the total to expenses tagged to those
+        product groups, which is what a product-scoped report needs.
+        """
         with get_session() as session:
             query = session.query(func.sum(Expense.amount)).filter(
                 Expense.date >= start_date,
@@ -216,6 +239,13 @@ class ExpenseService(BaseService[Expense]):
             )
             if business_only:
                 query = query.filter(Expense.is_personal == False)
+
+            group_ids = _normalise_group_ids(product_group_ids)
+            if group_ids is not None:
+                if not group_ids:
+                    return 0.0
+                query = query.filter(Expense.product_group_id.in_(group_ids))
+
             total = query.scalar()
             return float(total) if total else 0.0
         
@@ -439,8 +469,14 @@ class ExpenseService(BaseService[Expense]):
                 })
             return breakdown
 
-    def get_expense_details_by_category(self, start_date: date, end_date: date, business_only: bool = True) -> list:
-        """Get individual expense entries grouped by category with notes for detailed breakdown."""
+    def get_expense_details_by_category(self, start_date: date, end_date: date, business_only: bool = True,
+                                        product_group_ids=None) -> list:
+        """
+        Individual expense entries grouped by category with notes.
+
+        `product_group_ids=None` keeps the company-wide behaviour. A collection
+        restricts the breakdown to expenses tagged to those product groups.
+        """
         with get_session() as session:
             query = session.query(Expense).options(
                 joinedload(Expense.category)
@@ -451,6 +487,12 @@ class ExpenseService(BaseService[Expense]):
             )
             if business_only:
                 query = query.filter(Expense.is_personal == False)
+
+            group_ids = _normalise_group_ids(product_group_ids)
+            if group_ids is not None:
+                if not group_ids:
+                    return []
+                query = query.filter(Expense.product_group_id.in_(group_ids))
             
             expenses = query.order_by(Expense.category_id, Expense.date).all()
             
@@ -470,9 +512,95 @@ class ExpenseService(BaseService[Expense]):
                 categories[cat_name]['items'].append({
                     'notes': exp.notes or '',
                     'amount': exp.amount,
-                    'date': exp.date
+                    'date': exp.date,
+                    'product_group_id': exp.product_group_id
                 })
             
             # Convert to sorted list
             result = sorted(categories.values(), key=lambda x: x['total_amount'], reverse=True)
             return result
+
+    # ------------------------------------------------------------------
+    # Product-group tagging (product specific reports)
+    # ------------------------------------------------------------------
+    def assign_group_to_expenses(
+        self,
+        group_id: Optional[int],
+        category_id: Optional[int] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        only_untagged: bool = True,
+        is_personal: Optional[bool] = False,
+    ) -> int:
+        """
+        Tag matching expenses with a product group (or clear the tag when
+        `group_id` is None). Returns how many rows changed.
+
+        This is the bulk path so tagging a category's expenses is one action
+        instead of editing every entry.
+        """
+        with get_session() as session:
+            try:
+                query = session.query(Expense).filter(Expense.is_deleted == False)  # noqa: E712
+                if category_id is not None:
+                    query = query.filter(Expense.category_id == category_id)
+                if date_from is not None:
+                    query = query.filter(Expense.date >= date_from)
+                if date_to is not None:
+                    query = query.filter(Expense.date <= date_to)
+                if only_untagged and group_id is not None:
+                    query = query.filter(Expense.product_group_id.is_(None))
+                if is_personal is not None:
+                    query = query.filter(Expense.is_personal == is_personal)
+
+                changed = query.update(
+                    {'product_group_id': group_id}, synchronize_session=False
+                )
+                session.commit()
+                logger.info(
+                    "Tagged %d expense(s) with product group %s", changed, group_id
+                )
+                return int(changed or 0)
+            except Exception as e:
+                session.rollback()
+                logger.error("Failed to tag expenses with group %s: %s", group_id, e)
+                return 0
+
+    def get_expenses_by_group(self, group_id: Optional[int], start_date: Optional[date] = None,
+                              end_date: Optional[date] = None, limit: int = 500) -> List[Expense]:
+        """Expense rows tagged to a group (None = untagged rows), newest first."""
+        with get_session() as session:
+            query = session.query(Expense).options(
+                joinedload(Expense.category)
+            ).filter(Expense.is_deleted == False)  # noqa: E712
+
+            if group_id is None:
+                query = query.filter(Expense.product_group_id.is_(None))
+            else:
+                query = query.filter(Expense.product_group_id == group_id)
+            if start_date is not None:
+                query = query.filter(Expense.date >= start_date)
+            if end_date is not None:
+                query = query.filter(Expense.date <= end_date)
+
+            return query.order_by(Expense.date.desc()).limit(limit).all()
+
+    def group_totals_for_period(self, start_date: date, end_date: date,
+                                business_only: bool = True) -> Dict[Optional[int], float]:
+        """Total expenses per product group id (None key = untagged), for the UI."""
+        with get_session() as session:
+            query = session.query(
+                Expense.product_group_id,
+                func.sum(Expense.amount),
+            ).filter(
+                Expense.date >= start_date,
+                Expense.date <= end_date,
+                Expense.is_deleted == False,  # noqa: E712
+            )
+            if business_only:
+                query = query.filter(Expense.is_personal == False)  # noqa: E712
+
+            return {
+                row[0]: float(row[1] or 0.0)
+                for row in query.group_by(Expense.product_group_id).all()
+            }

@@ -22,10 +22,16 @@ class Expense(BaseModel):
     user_id = Column(Integer, ForeignKey('auth_users.id'), nullable=True)
     is_personal = Column(Boolean, default=False, nullable=False)
 
+    # Optional tag linking this expense to a product group. Scoped (product
+    # specific) reports only show expenses tagged to the subscriber's groups;
+    # full reports still include every business expense.
+    product_group_id = Column(Integer, ForeignKey('product_groups.id'), nullable=True)
+
 
     category = relationship("ExpenseCategory")
     bank_account = relationship("BankAccount")
     created_by = relationship("AuthUser", foreign_keys=[user_id])
+    product_group = relationship("ProductGroup")
 
 
     def __repr__(self):

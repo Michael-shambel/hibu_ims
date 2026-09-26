@@ -22,12 +22,26 @@ from models.new_sale_item import ProfessionalSaleItem
 from models.bank_transactions import BankTransaction
 from models.new_product import ProfessionalProduct
 from models.customer_daily_notification import CustomerDailyNotification
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple, Any, Set
 from datetime import date, datetime, time, timedelta
 from models.customers import Customer
 from sqlalchemy import or_
 
 logger = logging.getLogger(__name__)
+
+
+def _normalise_product_ids(product_ids) -> Optional[Set[int]]:
+    """
+    Normalise a product scope argument.
+
+    Returns None for 'no filter' (full report) and a (possibly empty) set when a
+    scope was supplied, so callers can tell "unscoped" apart from "scoped to
+    nothing". Passing an empty list/set therefore means 'filter everything out'.
+    """
+    if product_ids is None:
+        return None
+    return {int(p) for p in product_ids}
+
 
 class NewSaleService(BaseService[ProfessionalSale]):
     def __init__(self):
@@ -1424,11 +1438,13 @@ class NewSaleService(BaseService[ProfessionalSale]):
             
             return [r[0] for r in results if r[0]]
     
-    def get_total_selling_price_for_period(self, start_date: date, end_date: date) -> float:
+    def get_total_selling_price_for_period(self, start_date: date, end_date: date,
+                                           product_ids: Optional[Set[int]] = None) -> float:
+        """Total selling value for the period. `product_ids` scopes it to a subset."""
         start_dt = datetime.combine(start_date, time.min)
         end_dt = datetime.combine(end_date, time.max)
         with get_session() as session:
-            total = session.query(
+            query = session.query(
                 func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProfessionalSaleItem.unit_price)
             ).select_from(ProfessionalSaleItem).join(
                 ProductBatch, ProfessionalSaleItem.batch_id == ProductBatch.id
@@ -1442,14 +1458,22 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 ProfessionalSaleItem.is_deleted == False,
                 ProductBatch.is_deleted == False,
                 ProfessionalProduct.is_deleted == False
-            ).scalar()
+            )
+            product_ids = _normalise_product_ids(product_ids)
+            if product_ids is not None:
+                if not product_ids:
+                    return 0.0
+                query = query.filter(ProfessionalProduct.id.in_(product_ids))
+            total = query.scalar()
             return float(total) if total else 0.0
 
-    def get_total_cost_price_for_period(self, start_date: date, end_date: date) -> float:
+    def get_total_cost_price_for_period(self, start_date: date, end_date: date,
+                                        product_ids: Optional[Set[int]] = None) -> float:
+        """Total cost of goods sold for the period. `product_ids` scopes it to a subset."""
         start_dt = datetime.combine(start_date, time.min)
         end_dt = datetime.combine(end_date, time.max)
         with get_session() as session:
-            total = session.query(
+            query = session.query(
                 func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen * ProductBatch.cost_price)
             ).select_from(ProfessionalSaleItem).join(
                 ProductBatch, ProfessionalSaleItem.batch_id == ProductBatch.id
@@ -1463,15 +1487,23 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 ProfessionalSaleItem.is_deleted == False,
                 ProductBatch.is_deleted == False,
                 ProfessionalProduct.is_deleted == False
-            ).scalar()
+            )
+            product_ids = _normalise_product_ids(product_ids)
+            if product_ids is not None:
+                if not product_ids:
+                    return 0.0
+                query = query.filter(ProfessionalProduct.id.in_(product_ids))
+            total = query.scalar()
             return float(total) if total else 0.0
     
-    def get_product_profit_breakdown(self, start_date: date, end_date: date) -> List[Dict]:
+    def get_product_profit_breakdown(self, start_date: date, end_date: date,
+                                     product_ids: Optional[Set[int]] = None) -> List[Dict]:
+        """Per-product profit rows for the period, optionally scoped to a product subset."""
 
         start_dt = datetime.combine(start_date, time.min)
         end_dt = datetime.combine(end_date, time.max)
         with get_session() as session:
-            results = session.query(
+            query = session.query(
                 ProfessionalProduct.id.label('product_id'),
                 ProfessionalProduct.name.label('product_name'),
                 func.sum(ProfessionalSaleItem.quantity).label('carton_qty'),
@@ -1490,7 +1522,13 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 ProfessionalSaleItem.is_deleted == False,
                 ProductBatch.is_deleted == False,
                 ProfessionalProduct.is_deleted == False
-            ).group_by(
+            )
+            product_ids = _normalise_product_ids(product_ids)
+            if product_ids is not None:
+                if not product_ids:
+                    return []
+                query = query.filter(ProfessionalProduct.id.in_(product_ids))
+            results = query.group_by(
                 ProfessionalProduct.id, ProfessionalProduct.name
             ).all()
 
@@ -1500,6 +1538,7 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 profit = row.total_selling - row.total_cost
                 total_profit += profit
                 data.append({
+                    'product_id': row.product_id,
                     'product_name': row.product_name,
                     'carton_qty': int(row.carton_qty),
                     'quantity': int(row.total_qty),
@@ -1520,18 +1559,14 @@ class NewSaleService(BaseService[ProfessionalSale]):
             data.sort(key=lambda x: x['profit'], reverse=True)
             return data
     
-    def get_total_quantity_for_period(self, start_date: date, end_date: date) -> int:
+    def get_total_quantity_for_period(self, start_date: date, end_date: date,
+                                      product_ids: Optional[Set[int]] = None) -> int:
         """Return total quantity (units) sold in the date range."""
-        # from models.new_sale_item import ProfessionalSaleItem
-        # from models.new_sales import ProfessionalSale
-        # from sqlalchemy import func
-        # from datetime import datetime, time
-
         start_dt = datetime.combine(start_date, time.min)
         end_dt = datetime.combine(end_date, time.max)
 
         with get_session() as session:
-            total = session.query(
+            query = session.query(
                 func.sum(ProfessionalSaleItem.quantity * ProfessionalSaleItem.dozen)
             ).join(
                 ProfessionalSale, ProfessionalSaleItem.sale_id == ProfessionalSale.id
@@ -1539,7 +1574,17 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 ProfessionalSale.created_at.between(start_dt, end_dt),
                 ProfessionalSale.is_deleted == False,
                 ProfessionalSaleItem.is_deleted == False
-            ).scalar()
+            )
+            product_ids = _normalise_product_ids(product_ids)
+            if product_ids is not None:
+                if not product_ids:
+                    return 0
+                query = query.join(
+                    ProductBatch, ProfessionalSaleItem.batch_id == ProductBatch.id
+                ).join(
+                    ProfessionalProduct, ProductBatch.product_id == ProfessionalProduct.id
+                ).filter(ProfessionalProduct.id.in_(product_ids))
+            total = query.scalar()
             return int(total) if total else 0
     
     def get_customer_combined_history(self, customer_id: int) -> List[Dict]:

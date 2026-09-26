@@ -99,6 +99,7 @@ class ProductBatchService(BaseService[ProductBatch]):
                 if remaining == 0:
                     self.purchase_service.delete_purchase_cascade_in_session(session, purchase_id)
 
+            session.commit()
             return True
 
         except Exception as e:

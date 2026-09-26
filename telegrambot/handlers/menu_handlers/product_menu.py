@@ -116,6 +116,10 @@ async def product_reports_text_handler(update: Update, context: ContextTypes.DEF
     elif text == ButtonText.START_MENU:
         await update.message.reply_text("Returning to main menu...", reply_markup=ReplyKeyboardRemove())
         return await start(update, context)
+
+    elif text == ButtonText.REPORT_SUBSCRIPTION:
+        from telegrambot.handlers.menu_handlers.subscription_menu import report_subscription_menu
+        return await report_subscription_menu(update, context)
     
     else:
         await update.message.reply_text("Please use the buttons below to navigate.")

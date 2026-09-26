@@ -19,6 +19,7 @@ def _admin_inline_keyboard():
         [InlineKeyboardButton("📦 Product Reports / ንብረት መረጃ", callback_data=CallbackData.PRODUCT_REPORTS)],
         [InlineKeyboardButton("💰 Credit Report / ዱቤ መረጃ", callback_data=CallbackData.CREDIT_REPORTS)],
         [InlineKeyboardButton("🏦 Bank Transfer / ባንክ መረጃ", callback_data=CallbackData.BANK_TRANSFER)],
+        [InlineKeyboardButton("🔔 Report Subscription / ሪፖርት ደንበኝነት", callback_data=CallbackData.REPORT_SUBSCRIPTION)],
         [InlineKeyboardButton("❌ Cancel", callback_data=CallbackData.CANCEL)],
     ])
 
@@ -81,6 +82,10 @@ async def sales_submenu_handler(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == CallbackData.CREDIT_STATUS:
         from telegrambot.handlers.reports.credit_sales_report import credit_sales_report_handler
         return await credit_sales_report_handler(update, context)
+
+    elif data == CallbackData.REPORT_SUBSCRIPTION:
+        from telegrambot.handlers.menu_handlers.subscription_menu import report_subscription_menu
+        return await report_subscription_menu(update, context)
 
     elif data == CallbackData.BACK_TO_ADMIN:
         await context.bot.send_message(
@@ -243,6 +248,10 @@ async def sales_reports_text_handler(update: Update, context: ContextTypes.DEFAU
     elif text == ButtonText.START_MENU:
         await update.message.reply_text("Returning to main menu...", reply_markup=ReplyKeyboardRemove())
         return await start(update, context)
+
+    elif text == ButtonText.REPORT_SUBSCRIPTION:
+        from telegrambot.handlers.menu_handlers.subscription_menu import report_subscription_menu
+        return await report_subscription_menu(update, context)
 
     else:
         await update.message.reply_text("Please use the buttons below to navigate.")

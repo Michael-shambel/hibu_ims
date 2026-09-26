@@ -29,3 +29,8 @@ from .customers import Customer
 from .customer_daily_notification import CustomerDailyNotification
 from .cash_loan import CashLoan
 from .cost_type import CostType
+from .product_group import ProductGroup
+from .product_group_member import ProductGroupMember
+from .report_subscriber import ReportSubscriber
+from .subscriber_group import SubscriberGroup
+from .supplier import Supplier

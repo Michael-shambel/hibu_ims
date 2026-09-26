@@ -23,20 +23,28 @@ from telegrambot.handlers.reports.profit_report import (
 from ui.components.ethiopian_date import EthiopianDateConverter
 
 
-def daily_report_data(target_date: date) -> dict:
-    """Summary + per-product breakdown rows for one Gregorian day."""
-    return build_daily_profit_data(target_date)
+def daily_report_data(target_date: date, product_ids=None, expense_group_ids=None) -> dict:
+    """
+    Summary + per-product breakdown rows for one Gregorian day.
+
+    `product_ids` limits sales/cost/profit rows to a product subset and
+    `expense_group_ids` limits the expense side to the subscriber's product
+    groups. Both default to None, reproducing the company-wide report exactly.
+    """
+    return build_daily_profit_data(target_date, product_ids, expense_group_ids)
 
 
-def daily_report_caption(data: dict, target_date: date) -> str:
+def daily_report_caption(data: dict, target_date: date, scope_label: str = None) -> str:
     """Markdown caption the daily report is sent with."""
     eth_year, eth_month, eth_day = EthiopianDateConverter.to_ethiopian(target_date)
     net = data['total_selling'] - data['total_cost'] - data['expenses']
     margin = (net / data['total_selling'] * 100) if data['total_selling'] > 0 else 0.0
+    scope_line = f"🎯 *Scope:* {scope_label}\n" if scope_label else ""
     return (
         f"📊 *Daily Sales & Profit Report*\n"
         f"📅 {ETHIOPIAN_MONTHS[eth_month - 1][0]} {eth_day}, {eth_year} "
         f"(Gregorian: {target_date})\n"
+        f"{scope_line}"
         f"💰 Total Sales: ETB {data['total_selling']:,.2f}\n"
         f"📦 Total Cost: ETB {data['total_cost']:,.2f}\n"
         f"💸 Expenses: ETB {data['expenses']:,.2f}\n"
@@ -44,15 +52,23 @@ def daily_report_caption(data: dict, target_date: date) -> str:
     )
 
 
-def daily_report_pdf(data: dict, target_date: date) -> bytes:
+def daily_report_pdf(data: dict, target_date: date, scope_label: str = None) -> bytes:
     """Landscape A4 PDF for one Gregorian day."""
     eth_year, eth_month, eth_day = EthiopianDateConverter.to_ethiopian(target_date)
     return generate_daily_profit_pdf(
         data['total_selling'], data['total_cost'], data['expenses'],
         data['items'], eth_year, eth_month, eth_day, target_date,
         data.get('expense_breakdown', []),
+        scope_label=scope_label,
     )
 
 
-def daily_report_filename(target_date: date) -> str:
+def daily_report_filename(target_date: date, scope_label: str = None) -> str:
+    """Filename for the daily PDF, tagged with the scope so several PDFs in one
+    Telegram chat stay distinguishable."""
+    from services.report_subscription_service import scope_filename_tag
+
+    tag = scope_filename_tag(scope_label)
+    if tag:
+        return f"daily_profit_{tag}_{target_date}.pdf"
     return f"daily_profit_{target_date}.pdf"

@@ -247,6 +247,77 @@ def _doc(buffer):
 
 
 # ---------------------------------------------------------------------------
+# Product-scope helpers (product specific reports)
+# ---------------------------------------------------------------------------
+PRODUCT_HEADER = ["ስም / Item Name", "ብዛት / Qty", "ዋጋ / Cost", "ሽያጭ / Sales",
+                  "ትርፍ / Profit", "% ትርፍ / Profit %"]
+PRODUCT_COL_WIDTHS = [62 * mm, 22 * mm, 40 * mm, 40 * mm, 40 * mm, 34 * mm]
+
+
+def _scope_banner(scope_label):
+    """Banner naming the product scope of a scoped report (None when unscoped)."""
+    if not scope_label:
+        return None
+    return P("የምርት ስፋት / Product Scope: %s" % scope_label, size=10, bold=True,
+             align='C', color=colors.HexColor('#7b241c'))
+
+
+def _product_table(items):
+    """
+    Per-product profit table.
+
+    Shared by the daily report and by the scoped periodic reports (which have no
+    product section of their own). Empty `items` yields a zero total row so a
+    scoped subscriber still sees an explicit 'nothing in your scope' table.
+    """
+    rows = []
+    tot_cartons = 0
+    tot_cost = tot_sell = tot_profit = 0.0
+    for item in items or []:
+        selling = float(item.get('total_selling') or 0.0)
+        cost = float(item.get('total_cost') or 0.0)
+        profit = float(item.get('profit') or 0.0)
+        cartons = item.get('carton_qty')
+        if cartons is None:
+            cartons = item.get('quantity', 0)
+        tot_cartons += int(cartons or 0)
+        tot_cost += cost
+        tot_sell += selling
+        tot_profit += profit
+        rows.append([
+            item.get('product_name', ''),
+            _num(cartons),
+            _money(cost),
+            _money(selling),
+            _money(profit),
+            _pct((profit / selling * 100) if selling else 0.0),
+        ])
+    total_row = [
+        "ጠቅላላ / TOTAL",
+        _num(tot_cartons),
+        _money(tot_cost),
+        _money(tot_sell),
+        _money(tot_profit),
+        _pct((tot_profit / tot_sell * 100) if tot_sell else 0.0),
+    ]
+    return _detail_table(PRODUCT_HEADER, rows, PRODUCT_COL_WIDTHS, total_row=total_row)
+
+
+def _product_section(product_items, title="ዝርዝር ምርቶች / Product Breakdown"):
+    """Heading + per-product table, used by the scoped periodic reports."""
+    section = [
+        P(title, size=12, bold=True),
+        Spacer(1, 2 * mm),
+    ]
+    if product_items:
+        section.append(_product_table(product_items))
+    else:
+        section.append(P("በዚህ ጊዜ በስፋትዎ ውስጥ የሸጠ ምርት የለም / No product in your scope was sold in this period.",
+                         size=10))
+    return section
+
+
+# ---------------------------------------------------------------------------
 # Expense Breakdown Table Generator
 # ---------------------------------------------------------------------------
 def _expense_breakdown_table(expense_breakdown: list, total_expenses: float) -> Table:
@@ -312,6 +383,7 @@ def generate_daily_profit_pdf(
     eth_day: int,
     greg_date: date,
     expense_breakdown: list = None,
+    scope_label: str = None,
 ) -> bytes:
     """Daily report: summary box + per-product breakdown + expense breakdown."""
     buffer = io.BytesIO()
@@ -322,6 +394,10 @@ def generate_daily_profit_pdf(
     story.append(P("የቀን ሽያጭ እና ትርፍ ሪፖርት / Daily Sales & Profit Report", size=16, bold=True, align='C'))
     story.append(P("%s %d, %d   (Gregorian: %s)" % (month_name, eth_day, eth_year, greg_date.isoformat()),
                    size=11, align='C'))
+    banner = _scope_banner(scope_label)
+    if banner is not None:
+        story.append(Spacer(1, 2 * mm))
+        story.append(banner)
     story.append(Spacer(1, 6 * mm))
 
     net_profit = float(total_selling or 0) - float(total_cost or 0) - float(expenses or 0)
@@ -340,42 +416,7 @@ def generate_daily_profit_pdf(
     story.append(Spacer(1, 2 * mm))
 
     if items:
-        rows = []
-        tot_cartons = 0
-        tot_cost = tot_sell = tot_profit = 0.0
-        for item in items:
-            selling = float(item.get('total_selling') or 0.0)
-            cost = float(item.get('total_cost') or 0.0)
-            profit = float(item.get('profit') or 0.0)
-            cartons = item.get('carton_qty')
-            if cartons is None:
-                cartons = item.get('quantity', 0)
-            tot_cartons += int(cartons or 0)
-            tot_cost += cost
-            tot_sell += selling
-            tot_profit += profit
-            rows.append([
-                item.get('product_name', ''),
-                _num(cartons),
-                _money(cost),
-                _money(selling),
-                _money(profit),
-                _pct((profit / selling * 100) if selling else 0.0),
-            ])
-        total_row = [
-            "ጠቅላላ / TOTAL",
-            _num(tot_cartons),
-            _money(tot_cost),
-            _money(tot_sell),
-            _money(tot_profit),
-            _pct((tot_profit / tot_sell * 100) if tot_sell else 0.0),
-        ]
-        story.append(_detail_table(
-            ["ስም / Item Name", "ብዛት / Qty", "ዋጋ / Cost", "ሽያጭ / Sales", "ትርፍ / Profit", "% ትርፍ / Profit %"],
-            rows,
-            [62 * mm, 22 * mm, 40 * mm, 40 * mm, 40 * mm, 34 * mm],
-            total_row=total_row,
-        ))
+        story.append(_product_table(items))
     else:
         story.append(P("በዚህ ቀን ሽያጭ አልተመዝገበም / No sales recorded on this date.", size=10))
 
@@ -400,6 +441,8 @@ def generate_monthly_profit_pdf(
     start_date: date,
     end_date: date,
     daily_data: list,
+    product_items: list = None,
+    scope_label: str = None,
 ) -> bytes:
     """Monthly report: day-by-day breakdown + individual expense tables for each day."""
     buffer = io.BytesIO()
@@ -409,6 +452,10 @@ def generate_monthly_profit_pdf(
     story.append(P("ወርሃዊ ትርፍ ሪፖርት / Monthly Profit Report", size=16, bold=True, align='C'))
     story.append(P(period_label, size=11, align='C'))
     story.append(P(_range_label(start_date, end_date), size=9, align='C'))
+    banner = _scope_banner(scope_label)
+    if banner is not None:
+        story.append(Spacer(1, 2 * mm))
+        story.append(banner)
     story.append(Spacer(1, 6 * mm))
 
     tot_qty = 0
@@ -468,6 +515,12 @@ def generate_monthly_profit_pdf(
     else:
         story.append(P("በዚህ ወር መረጃ አልተገኘም / No data available for this period.", size=10))
 
+    # Scoped reports add the product table the periodic layout has no room for
+    if product_items is not None:
+        story.append(Spacer(1, 8 * mm))
+        story.extend(_product_section(product_items,
+                                     "ዝርዝር ምርቶች / Product Breakdown (Month)"))
+
     # Add individual expense tables for each day that has expenses
     from reportlab.platypus import PageBreak
     for d in daily_data:
@@ -496,6 +549,8 @@ def generate_period_profit_pdf(
     start_date: date,
     end_date: date,
     monthly_data: list,
+    product_items: list = None,
+    scope_label: str = None,
 ) -> bytes:
     """Quarterly / semi-annual / annual report: month-by-month breakdown + individual monthly expense tables."""
     buffer = io.BytesIO()
@@ -505,6 +560,10 @@ def generate_period_profit_pdf(
     story.append(P("የትርፍ ሪፖርት / Profit Report", size=16, bold=True, align='C'))
     story.append(P(period_label, size=11, align='C'))
     story.append(P(_range_label(start_date, end_date), size=9, align='C'))
+    banner = _scope_banner(scope_label)
+    if banner is not None:
+        story.append(Spacer(1, 2 * mm))
+        story.append(banner)
     story.append(Spacer(1, 6 * mm))
 
     tot_qty = 0
@@ -567,6 +626,12 @@ def generate_period_profit_pdf(
     else:
         story.append(P("በዚህ ጊዜ መረጃ አልተገኘም / No data available for this period.", size=10))
 
+    # Scoped reports add the product table the periodic layout has no room for
+    if product_items is not None:
+        story.append(Spacer(1, 8 * mm))
+        story.extend(_product_section(product_items,
+                                     "ዝርዝር ምርቶች / Product Breakdown (Period)"))
+
     # Add individual expense tables for each month that has expenses
     from reportlab.platypus import PageBreak
     for m in monthly_data:
@@ -594,19 +659,28 @@ def generate_period_profit_pdf(
 # ---------------------------------------------------------------------------
 # Data builders
 # ---------------------------------------------------------------------------
-def _get_carton_quantity_for_period(sale_svc, start_date: date, end_date: date) -> int:
-    """Total cartons (sum of item.quantity only, i.e. NOT quantity * dozen)."""
+def _get_carton_quantity_for_period(sale_svc, start_date: date, end_date: date,
+                                    product_ids=None) -> int:
+    """Total cartons (sum of item.quantity only, i.e. NOT quantity * dozen).
+
+    `product_ids` scopes the count to a product subset (None = whole company).
+    """
     from sqlalchemy import func
 
+    from models.new_product import ProfessionalProduct
     from models.new_sale_item import ProfessionalSaleItem
     from models.new_sales import ProfessionalSale
+    from models.product_batch import ProductBatch
     from services.base_service import get_session
 
     start_dt = datetime.combine(start_date, time.min)
     end_dt = datetime.combine(end_date, time.max)
 
+    if product_ids is not None and not product_ids:
+        return 0
+
     with get_session() as session:
-        total = session.query(
+        query = session.query(
             func.sum(ProfessionalSaleItem.quantity)
         ).join(
             ProfessionalSale, ProfessionalSaleItem.sale_id == ProfessionalSale.id
@@ -614,12 +688,25 @@ def _get_carton_quantity_for_period(sale_svc, start_date: date, end_date: date) 
             ProfessionalSale.created_at.between(start_dt, end_dt),
             ProfessionalSale.is_deleted == False,          # noqa: E712
             ProfessionalSaleItem.is_deleted == False,      # noqa: E712
-        ).scalar()
+        )
+        if product_ids is not None:
+            query = query.join(
+                ProductBatch, ProfessionalSaleItem.batch_id == ProductBatch.id
+            ).join(
+                ProfessionalProduct, ProductBatch.product_id == ProfessionalProduct.id
+            ).filter(ProfessionalProduct.id.in_(list(product_ids)))
+        total = query.scalar()
         return int(total) if total else 0
 
 
-def build_daily_profit_data(target_date: date) -> dict:
-    """Summary + per-product rows + expense breakdown for one day."""
+def build_daily_profit_data(target_date: date, product_ids=None, expense_group_ids=None) -> dict:
+    """
+    Summary + per-product rows + expense breakdown for one day.
+
+    `product_ids` scopes sales/cost/profit rows; `expense_group_ids` scopes the
+    expenses to the product groups the subscriber owns. Both default to None,
+    which reproduces the company-wide report exactly.
+    """
     from services.expense_service import ExpenseService
     from services.new_sale_service import NewSaleService
 
@@ -627,17 +714,21 @@ def build_daily_profit_data(target_date: date) -> dict:
     expense_svc = ExpenseService()
 
     return {
-        'total_selling': sale_svc.get_total_selling_price_for_period(target_date, target_date),
-        'total_cost': sale_svc.get_total_cost_price_for_period(target_date, target_date),
-        'expenses': expense_svc.get_total_expenses_for_period(target_date, target_date),
-        'items': sale_svc.get_product_profit_breakdown(target_date, target_date),
+        'total_selling': sale_svc.get_total_selling_price_for_period(
+            target_date, target_date, product_ids),
+        'total_cost': sale_svc.get_total_cost_price_for_period(
+            target_date, target_date, product_ids),
+        'expenses': expense_svc.get_total_expenses_for_period(
+            target_date, target_date, product_group_ids=expense_group_ids),
+        'items': sale_svc.get_product_profit_breakdown(target_date, target_date, product_ids),
         'expense_breakdown': expense_svc.get_expense_details_by_category(
-            target_date, target_date
+            target_date, target_date, product_group_ids=expense_group_ids
         ),
     }
 
 
-def build_monthly_profit_data(start_date: date, end_date: date) -> list:
+def build_monthly_profit_data(start_date: date, end_date: date, product_ids=None,
+                              expense_group_ids=None) -> list:
     """Day-by-day rows + expense breakdown covering [start_date, end_date]."""
     from services.expense_service import ExpenseService
     from services.new_sale_service import NewSaleService
@@ -648,14 +739,16 @@ def build_monthly_profit_data(start_date: date, end_date: date) -> list:
     data = []
     current = start_date
     while current <= end_date:
-        selling = sale_svc.get_total_selling_price_for_period(current, current)
-        cost = sale_svc.get_total_cost_price_for_period(current, current)
-        exp = expense_svc.get_total_expenses_for_period(current, current)
+        selling = sale_svc.get_total_selling_price_for_period(current, current, product_ids)
+        cost = sale_svc.get_total_cost_price_for_period(current, current, product_ids)
+        exp = expense_svc.get_total_expenses_for_period(
+            current, current, product_group_ids=expense_group_ids)
         gross = selling - cost
         net = gross - exp
         data.append({
             'date': current,
-            'total_quantity': _get_carton_quantity_for_period(sale_svc, current, current),
+            'total_quantity': _get_carton_quantity_for_period(
+                sale_svc, current, current, product_ids),
             'total_selling': selling,
             'total_cost': cost,
             'gross_profit': gross,
@@ -663,7 +756,7 @@ def build_monthly_profit_data(start_date: date, end_date: date) -> list:
             'net_profit': net,
             'margin': (net / selling * 100) if selling else 0.0,
             'expense_breakdown': expense_svc.get_expense_details_by_category(
-                current, current
+                current, current, product_group_ids=expense_group_ids
             ),
         })
         current += timedelta(days=1)
@@ -694,7 +787,8 @@ def _ethiopian_months_between(start_date: date, end_date: date):
             break
 
 
-def build_period_profit_data(start_date: date, end_date: date) -> list:
+def build_period_profit_data(start_date: date, end_date: date, product_ids=None,
+                             expense_group_ids=None) -> list:
     """Month-by-month rows + expense breakdown for the Ethiopian months inside [start_date, end_date]."""
     from services.expense_service import ExpenseService
     from services.new_sale_service import NewSaleService
@@ -704,16 +798,18 @@ def build_period_profit_data(start_date: date, end_date: date) -> list:
 
     month_data = []
     for label, m_start, m_end, yr, mn in _ethiopian_months_between(start_date, end_date):
-        selling = sale_svc.get_total_selling_price_for_period(m_start, m_end)
-        cost = sale_svc.get_total_cost_price_for_period(m_start, m_end)
-        exp = expense_svc.get_total_expenses_for_period(m_start, m_end)
+        selling = sale_svc.get_total_selling_price_for_period(m_start, m_end, product_ids)
+        cost = sale_svc.get_total_cost_price_for_period(m_start, m_end, product_ids)
+        exp = expense_svc.get_total_expenses_for_period(
+            m_start, m_end, product_group_ids=expense_group_ids)
         gross = selling - cost
         net = gross - exp
         month_data.append({
             'label': label,
             'start': m_start,
             'end': m_end,
-            'quantity': _get_carton_quantity_for_period(sale_svc, m_start, m_end),
+            'quantity': _get_carton_quantity_for_period(
+                sale_svc, m_start, m_end, product_ids),
             'selling': selling,
             'cost': cost,
             'gross': gross,
@@ -723,7 +819,7 @@ def build_period_profit_data(start_date: date, end_date: date) -> list:
             'year': yr,
             'month': mn,
             'expense_breakdown': expense_svc.get_expense_details_by_category(
-                m_start, m_end
+                m_start, m_end, product_group_ids=expense_group_ids
             ),
         })
 
@@ -740,3 +836,15 @@ def build_period_profit_data(start_date: date, end_date: date) -> list:
                 m['change'] = 100.0 if m['net'] > 0 else (-100.0 if m['net'] < 0 else 0.0)
 
     return month_data
+
+
+def build_period_product_breakdown(start_date: date, end_date: date, product_ids=None) -> list:
+    """
+    Per-product rows aggregated over the whole period.
+
+    The periodic PDFs are day-by-day / month-by-month tables and have no product
+    section of their own, so a product-scoped periodic report adds this table.
+    """
+    from services.new_sale_service import NewSaleService
+
+    return NewSaleService().get_product_profit_breakdown(start_date, end_date, product_ids)

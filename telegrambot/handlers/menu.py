@@ -11,7 +11,7 @@ from telegrambot.handlers.menu_handlers.states import (
     BANK_TRANSFER_AMOUNT, BANK_TRANSFER_REASON, BANK_TRANSFER_EXTERNAL_PAYEE,
     EXPENSE_MENU, EXPENSE_TYPE_SELECTION, EXPENSE_BANK_ACCOUNT_SELECTION,
     EXPENSE_CATEGORY_SELECTION, EXPENSE_AMOUNT_ENTRY,
-    ADMIN_AUTH_USERNAME, ADMIN_AUTH_PASSWORD
+    ADMIN_AUTH_USERNAME, ADMIN_AUTH_PASSWORD, REPORT_SUBSCRIPTION_MENU
 )
 from telegrambot.handlers.menu_handlers.main_menu import (
     start, cancel, handle_role_selection, admin_menu_handler, handle_persistent_buttons, get_my_id
@@ -78,9 +78,16 @@ from telegrambot.handlers.menu_handlers.expense_menu import (
     expense_notes_entry_handler,
 )
 
+from telegrambot.handlers.menu_handlers.subscription_menu import (
+    subscription_command,
+    subscription_submenu_handler,
+    subscription_text_handler,
+)
+
 conv_handler = ConversationHandler(
     entry_points=[CommandHandler('start', start),
-                  CommandHandler('getid', get_my_id)
+                  CommandHandler('getid', get_my_id),
+                  CommandHandler('subscription', subscription_command)
                 ],
     states={
         ROLE_SELECTION: [
@@ -192,11 +199,18 @@ conv_handler = ConversationHandler(
         EXPENSE_NOTES_ENTRY: [
             MessageHandler(filters.TEXT & ~filters.COMMAND, expense_notes_entry_handler)
         ],
+        REPORT_SUBSCRIPTION_MENU: [
+            CallbackQueryHandler(subscription_submenu_handler),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, subscription_text_handler)
+        ],
     },
     fallbacks=[
         CommandHandler('cancel', cancel),
         CommandHandler('start', start),
         CommandHandler('getid', get_my_id),
+        # Works from any menu state, so an admin can adjust their subscription
+        # without walking back to the admin panel.
+        CommandHandler('subscription', subscription_command),
         CallbackQueryHandler(cancel, pattern='^cancel$'),
     ],
     per_user=True,

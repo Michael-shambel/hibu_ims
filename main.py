@@ -58,6 +58,10 @@ if not is_valid:
 
 def setup_database():
     Base.metadata.create_all(bind=db.engine)
+    # create_all never ALTERs an existing table, so new nullable columns on
+    # already-created tables (e.g. expenses.product_group_id) land here.
+    from migrations import run_startup_migrations
+    run_startup_migrations()
     auth_service = AuthService()
     auth_service.create_admin_if_not_exists("ADMIN", "ADMIN123")
     print("Tables created successfully.")

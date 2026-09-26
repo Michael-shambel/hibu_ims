@@ -470,6 +470,51 @@ class PurchaseService(BaseService[Purchase]):
             result.sort(key=lambda x: x['remaining'], reverse=True)
             return result
     
+    def get_payment_balance_shortfalls(self, payments: List[Tuple[float, int]]) -> List[Dict]:
+        """Return one entry per bank account whose balance is below the combined
+        amount being paid from it.
+
+        Each entry carries: bank_id, bank_display, balance, needed, shortfall.
+        Used by the UI to name the short account(s) and by record_supplier_payment
+        to build a precise error message.
+        """
+        needed_by_bank = {}
+        for amount, bank_account_id in payments:
+            if amount is None or bank_account_id is None:
+                continue
+            amount = float(amount)
+            if amount <= 0:
+                continue
+            bank_account_id = int(bank_account_id)
+            needed_by_bank[bank_account_id] = needed_by_bank.get(bank_account_id, 0.0) + amount
+
+        shortfalls = []
+        bank_account_service = None
+        for bank_id, needed in needed_by_bank.items():
+            balance = float(self.bank_transaction_service.get_balance(bank_id))
+            if balance >= needed - 0.001:
+                continue
+            if bank_account_service is None:
+                from services.bank_account_service import BankAccountService
+                bank_account_service = BankAccountService()
+            account = bank_account_service.get_by_id(bank_id)
+            if account is not None:
+                bank_display = (
+                    f"{account.bank_name} - {account.account_name}"
+                    if account.bank_name and account.account_name
+                    else (account.bank_name or account.account_name or f"Bank account #{bank_id}")
+                )
+            else:
+                bank_display = f"Bank account #{bank_id}"
+            shortfalls.append({
+                'bank_id': bank_id,
+                'bank_display': bank_display,
+                'balance': balance,
+                'needed': needed,
+                'shortfall': needed - balance,
+            })
+        return shortfalls
+    
     def record_supplier_payment(
         self,
         supplier_id: int,
@@ -585,22 +630,15 @@ class PurchaseService(BaseService[Purchase]):
                     else:
                         return False, "No outstanding credit purchases for supplier."
 
-                # ---- 5. Proceed with payment allocation (unchanged) ----
-                running_balances = {}
-                for amount, bank_account_id in payments:
-                    if amount <= 0:
-                        continue
-                    if bank_account_id not in running_balances:
-                        bank_tx_service = BankTransactionService()
-                        current_balance = bank_tx_service.get_balance(bank_account_id)
-                        running_balances[bank_account_id] = current_balance
-                    if running_balances[bank_account_id] < amount:
-                        return False, (
-                            f"Insufficient funds. "
-                            f"Available: ${running_balances[bank_account_id]:,.2f}, "
-                            f"Required: ${amount:,.2f}"
-                        )
-                    running_balances[bank_account_id] -= amount
+                # ---- 5. Verify the selected bank accounts can cover the payments ----
+                shortfalls = self.get_payment_balance_shortfalls(payments)
+                if shortfalls:
+                    lines = "\n".join(
+                        f"• {s['bank_display']} – available ${s['balance']:,.2f}, "
+                        f"required ${s['needed']:,.2f}"
+                        for s in shortfalls
+                    )
+                    return False, f"Insufficient funds in the following account(s):\n{lines}"
 
                 affected_accounts = set()
 

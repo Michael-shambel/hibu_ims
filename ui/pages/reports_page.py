@@ -938,11 +938,23 @@ class ReportsPage(QWidget):
         db_btn.clicked.connect(self.db_maintenance)
         actions_layout.addWidget(db_btn)
         
+        # Report subscriptions (product specific reports)
+        sub_btn = QPushButton("Report Subscriptions")
+        sub_btn.setStyleSheet("background-color: #3F51B5; color: white;")
+        sub_btn.clicked.connect(self.manage_report_subscriptions)
+        actions_layout.addWidget(sub_btn)
+
         # Audit log
         audit_btn = QPushButton("View Audit Logs")
         audit_btn.setStyleSheet("background-color: #607D8B; color: white;")
         audit_btn.clicked.connect(self.view_audit_logs)
         actions_layout.addWidget(audit_btn)
+
+        # Amharic names used in the store / admin telegram messages
+        amharic_btn = QPushButton("🇪🇹 Amharic Names")
+        amharic_btn.setStyleSheet("background-color: #2E7D32; color: white;")
+        amharic_btn.clicked.connect(self.open_amharic_names)
+        actions_layout.addWidget(amharic_btn)
         
         layout.addLayout(actions_layout)
         
@@ -969,9 +981,25 @@ class ReportsPage(QWidget):
         from ui.pages.user_management_dialog import UserManagementDialog
         dlg = UserManagementDialog(self)
         dlg.exec()
+
+    def manage_report_subscriptions(self):
+        """Open the product group / report subscriber configuration dialog"""
+        from ui.pages.report_subscription_dialog import ReportSubscriptionDialog
+        dlg = ReportSubscriptionDialog(self)
+        dlg.exec()
     
     def db_maintenance(self):
         self.backup_database()
+    
+    def open_amharic_names(self):
+        """Review and fix the Amharic spelling of product/delivery names."""
+        from ui.pages.amharic_names_dialog import AmharicNamesDialog
+        try:
+            dialog = AmharicNamesDialog(self)
+            dialog.exec()
+        except Exception as e:
+            logger.error(f"Failed to open Amharic names dialog: {e}", exc_info=True)
+            QMessageBox.critical(self, "Amharic Names", f"Could not open the dialog:\n{e}")
     
     def view_audit_logs(self):
         """View audit logs"""
