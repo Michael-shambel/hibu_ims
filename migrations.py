@@ -40,6 +40,10 @@ def run_startup_migrations() -> None:
     try:
         # Must run after create_all so product_groups exists for the reference.
         ensure_column('expenses', 'product_group_id', 'INTEGER REFERENCES product_groups(id)')
+        # Customs tax rework: total freight header + the two tax components.
+        ensure_column('import_shipments', 'tax_total_freight', 'FLOAT')
+        ensure_column('shipment_products', 'tax_first_etb', 'FLOAT')
+        ensure_column('shipment_products', 'tax_second_etb', 'FLOAT')
     except Exception:
         logger.exception("Startup migrations failed; continuing with current schema")
 

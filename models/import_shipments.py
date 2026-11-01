@@ -29,6 +29,8 @@ class ImportShipment(BaseModel):
     stocked_in = Column(Boolean, default=False, nullable=False)
     purchase_id = Column(Integer, ForeignKey('purchases.id'), nullable=True)
     tax_usd_rate = Column(Float, nullable=True)
+    tax_total_freight = Column(Float, nullable=True)   # ETB, whole shipment
+    # Legacy header fields from the old customs formula (kept for old records)
     tax_total_usd = Column(Float, nullable=True)
     tax_sample_frt = Column(Float, nullable=True)
     tax_rater = Column(Float, nullable=True)

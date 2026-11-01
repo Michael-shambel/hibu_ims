@@ -28,6 +28,9 @@ class ShipmentProduct(BaseModel):
     usd_per_dozen = Column(Float, nullable=True)
     total_usd = Column(Float, nullable=True)
     total_price_etb = Column(Float, nullable=True)
+    tax_first_etb = Column(Float, nullable=True)    # Tax 1, line total in ETB
+    tax_second_etb = Column(Float, nullable=True)   # Tax 2, line total in ETB
+    # Legacy columns from the old customs formula (kept for old records)
     tax_frt_ctn = Column(Float, nullable=True)
     tax_dpv_ctn = Column(Float, nullable=True)
     total_tax_etb = Column(Float, nullable=True)

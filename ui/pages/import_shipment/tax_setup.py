@@ -11,6 +11,12 @@ from PySide6.QtGui import QFont, QColor
 from ui.pages.product_dialog import ModernLineEdit
 from ui.components.ethiopian_date import EthiopianDateEdit
 
+# Customs tax parameters
+#   Tax 1 = Qty/doz * USD/doz * DEFAULT_TAX_RATER * USD->ETB   (per line)
+#   Tax 2 = Total Freight / FREIGHT_TAX_DIVISOR / Qty/doz     (ETB per dozen)
+DEFAULT_TAX_RATER = 0.73755
+FREIGHT_TAX_DIVISOR = 2000.0
+
 
 class TaxSetupMixin:
     def setup_tax_tab(self):
@@ -35,26 +41,20 @@ class TaxSetupMixin:
         self.tax_usd_rate.setValue(160.0)
         self.tax_usd_rate.valueChanged.connect(self.recalculate_tax)
 
-        self.tax_total_usd = QDoubleSpinBox()
-        self.tax_total_usd.setRange(0.0, 1000000.0)
-        self.tax_total_usd.setDecimals(2)
-        self.tax_total_usd.setPrefix("$ ")
-        self.tax_total_usd.setValue(0.0)
-        self.tax_total_usd.valueChanged.connect(self.recalculate_tax)
-
-        self.tax_sample_frt = QDoubleSpinBox()
-        self.tax_sample_frt.setRange(0.0, 1000000.0)
-        self.tax_sample_frt.setDecimals(2)
-        self.tax_sample_frt.setPrefix("ETB ")
-        self.tax_sample_frt.setValue(0.0)
-        self.tax_sample_frt.valueChanged.connect(self.recalculate_tax)
+        self.tax_total_freight = QDoubleSpinBox()
+        self.tax_total_freight.setRange(0.0, 1000000000.0)
+        self.tax_total_freight.setDecimals(2)
+        self.tax_total_freight.setPrefix("ETB ")
+        self.tax_total_freight.setValue(0.0)
+        self.tax_total_freight.setToolTip(
+            "Freight for the whole shipment in ETB. Used by Tax 2."
+        )
+        self.tax_total_freight.valueChanged.connect(self.recalculate_tax)
 
         row1_layout.addWidget(QLabel("USD to ETB Rate:"))
         row1_layout.addWidget(self.tax_usd_rate)
-        row1_layout.addWidget(QLabel("Total USD:"))
-        row1_layout.addWidget(self.tax_total_usd)
-        row1_layout.addWidget(QLabel("Sample Freight (ETB):"))
-        row1_layout.addWidget(self.tax_sample_frt)
+        row1_layout.addWidget(QLabel("Total Freight (ETB):"))
+        row1_layout.addWidget(self.tax_total_freight)
         row1_layout.addStretch()
 
         # ---- Row 2 ----
@@ -65,23 +65,22 @@ class TaxSetupMixin:
 
         self.tax_rater = QDoubleSpinBox()
         self.tax_rater.setRange(0.0, 1.0)
-        self.tax_rater.setDecimals(4)
-        self.tax_rater.setSingleStep(0.01)
-        self.tax_rater.setValue(0.0)
+        self.tax_rater.setDecimals(5)
+        self.tax_rater.setSingleStep(0.001)
+        self.tax_rater.setValue(DEFAULT_TAX_RATER)
+        self.tax_rater.setToolTip("Customs tax rater (default 0.73755).")
         self.tax_rater.valueChanged.connect(self.recalculate_tax)
 
-        self.tax_freight_ratio_label = QLabel("0.0000")
-        self.tax_freight_ratio_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
-        self.tax_freight_ratio_label.setStyleSheet(
-            "color: #2c3e50; background-color: #f8f9fa; "
-            "padding: 4px 12px; border-radius: 4px; border: 1px solid #d1d5db;"
+        self.tax_formula_label = QLabel(
+            "Tax 1 = Qty/doz × USD/doz × rater × USD→ETB    •    "
+            "Tax 2 = Total Freight ÷ 2000 ÷ Qty/doz"
         )
+        self.tax_formula_label.setStyleSheet("color: #64748b; font-size: 12px;")
 
         row2_layout.addWidget(QLabel("Tax Rater:"))
         row2_layout.addWidget(self.tax_rater)
-        row2_layout.addSpacing(30)
-        row2_layout.addWidget(QLabel("Tax Freight Ratio:"))
-        row2_layout.addWidget(self.tax_freight_ratio_label)
+        row2_layout.addSpacing(20)
+        row2_layout.addWidget(self.tax_formula_label)
         row2_layout.addStretch()
 
         input_layout.addRow(row1_widget)
@@ -96,9 +95,20 @@ class TaxSetupMixin:
         self.tax_table.setColumnCount(14)
         self.tax_table.setHorizontalHeaderLabels([
             "Item #", "Product Name", "Unit", "Qty/doz", "USD/doz",
-            "Total USD", "Total ETB", "FRT Ratio", "FRT/CRT",
-            "DPV/CRT", "Rater", "Total Tax ETB", "Tax/doz", "Tax/pcs"
+            "Total USD", "Total ETB", "Tax 1 /doz", "Tax 2 /doz",
+            "Tax 1 (ETB)", "Tax 2 (ETB)", "Total Tax ETB", "Tax/doz", "Tax/pcs"
         ])
+        self.tax_table.horizontalHeaderItem(3).setToolTip("Number of dozens for this line")
+        self.tax_table.horizontalHeaderItem(4).setToolTip("Price per dozen in USD")
+        self.tax_table.horizontalHeaderItem(7).setToolTip(
+            "USD/doz × rater × USD→ETB rate"
+        )
+        self.tax_table.horizontalHeaderItem(8).setToolTip(
+            "Total Freight ÷ 2000 ÷ Qty/doz"
+        )
+        self.tax_table.horizontalHeaderItem(13).setToolTip(
+            "Tax/doz ÷ Qty/doz"
+        )
 
         # Column widths
         self.tax_table.setColumnWidth(0, 100)
@@ -108,13 +118,13 @@ class TaxSetupMixin:
         self.tax_table.setColumnWidth(4, 100)  # USD/doz
         self.tax_table.setColumnWidth(5, 100)
         self.tax_table.setColumnWidth(6, 100)
-        self.tax_table.setColumnWidth(7, 80)
+        self.tax_table.setColumnWidth(7, 100)
         self.tax_table.setColumnWidth(8, 100)
         self.tax_table.setColumnWidth(9, 100)
-        self.tax_table.setColumnWidth(10, 80)
+        self.tax_table.setColumnWidth(10, 100)
         self.tax_table.setColumnWidth(11, 120)
-        self.tax_table.setColumnWidth(12, 100)
-        self.tax_table.setColumnWidth(13, 100)
+        self.tax_table.setColumnWidth(12, 90)
+        self.tax_table.setColumnWidth(13, 90)
 
         header = self.tax_table.horizontalHeader()
         header.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -198,8 +208,8 @@ class TaxSetupMixin:
 
         # Initialise tax values
         self._tax_ps_values = {}
-        self._current_freight_ratio = 0.0
-        self._current_rater = 0.15
+        self._current_total_freight = 0.0
+        self._current_rater = DEFAULT_TAX_RATER
         self._current_usd_rate = 160.0
         self._tax_bank_account_id = None
         self._tax_paid = False
@@ -232,17 +242,10 @@ class TaxSetupMixin:
             return
 
         usd_rate = self.tax_usd_rate.value()
-        total_usd = self.tax_total_usd.value()
-        sample_frt = self.tax_sample_frt.value()
+        total_freight = self.tax_total_freight.value()
         rater = self.tax_rater.value()
 
-        if sample_frt > 0:
-            freight_ratio = (total_usd * usd_rate) / sample_frt
-        else:
-            freight_ratio = 0.0
-        self.tax_freight_ratio_label.setText(f"{freight_ratio:.4f}")
-
-        self._current_freight_ratio = freight_ratio
+        self._current_total_freight = total_freight
         self._current_rater = rater
         self._current_usd_rate = usd_rate
         self._tax_ps_values = {}
@@ -261,7 +264,14 @@ class TaxSetupMixin:
         self.calculate_landed()
 
     def _recalculate_tax_row(self, row):
-        """Recalculate a single tax row."""
+        """Recalculate a single tax row.
+
+        Tax 1 (ETB/doz) = USD/doz × rater × USD→ETB rate
+        Tax 2 (ETB/doz) = Total Freight ÷ 2000 ÷ Qty/doz
+
+        The line's total tax is (Tax 1 + Tax 2) × Qty/doz, i.e. the 1st tax plus
+        the 2nd tax for that product.
+        """
         # Get Qty/doz from editable column 3
         qty_doz_item = self.tax_table.item(row, 3)
         if not qty_doz_item or not qty_doz_item.text():
@@ -286,30 +296,39 @@ class TaxSetupMixin:
 
         # Get shared values
         usd_rate = self._current_usd_rate
-        freight_ratio = self._current_freight_ratio
         rater = self._current_rater
+        total_freight = self._current_total_freight
 
-        # Calculate all columns
+        # Goods value
         total_price_usd = qty_doz * usd_doz
         total_price_etb = total_price_usd * usd_rate
-        frt_ct = total_price_etb / freight_ratio if freight_ratio != 0 else 0.0
-        dpv_ct = total_price_etb + frt_ct
-        total_tax = rater * dpv_ct
+
+        # 1st tax: direct calculation on the goods value
+        tax1_doz = usd_doz * rater * usd_rate
+        tax1_total = tax1_doz * qty_doz
+
+        # 2nd tax: freight share for this line
+        tax2_doz = total_freight / FREIGHT_TAX_DIVISOR / qty_doz if qty_doz > 0 else 0.0
+        tax2_total = tax2_doz * qty_doz
+
+        total_tax = tax1_total + tax2_total
         tax_doz = total_tax / qty_doz if qty_doz > 0 else 0.0
-        tax_ps = tax_doz / 12 if tax_doz > 0 else 0.0
+
+        # Tax per piece: Tax/doz divided by the row's Qty/doz (not a fixed 12)
+        tax_ps = tax_doz / qty_doz if qty_doz > 0 else 0.0
 
         self.tax_table.blockSignals(True)
 
         # Set computed columns
-        self._set_tax_cell(row, 5, f"{total_price_usd:,.2f}", editable=False)   # Total USD
-        self._set_tax_cell(row, 6, f"{total_price_etb:,.2f}", editable=False)   # Total ETB
-        self._set_tax_cell(row, 7, f"{freight_ratio:.4f}", editable=False)      # FRT Ratio
-        self._set_tax_cell(row, 8, f"{frt_ct:,.2f}", editable=False)            # FRT/CT
-        self._set_tax_cell(row, 9, f"{dpv_ct:,.2f}", editable=False)            # DPV/CT
-        self._set_tax_cell(row, 10, f"{rater:.4f}", editable=False)             # Rater
-        self._set_tax_cell(row, 11, f"{total_tax:,.2f}", editable=False)        # Total Tax
-        self._set_tax_cell(row, 12, f"{tax_doz:,.2f}", editable=False)          # Tax/doz
-        self._set_tax_cell(row, 13, f"{tax_ps:,.2f}", editable=False)           # Tax/pcs
+        self._set_tax_cell(row, 5, f"{total_price_usd:,.2f}")   # Total USD
+        self._set_tax_cell(row, 6, f"{total_price_etb:,.2f}")   # Total ETB
+        self._set_tax_cell(row, 7, f"{tax1_doz:,.2f}")          # Tax 1 /doz
+        self._set_tax_cell(row, 8, f"{tax2_doz:,.2f}")          # Tax 2 /doz
+        self._set_tax_cell(row, 9, f"{tax1_total:,.2f}")        # Tax 1 (ETB)
+        self._set_tax_cell(row, 10, f"{tax2_total:,.2f}")       # Tax 2 (ETB)
+        self._set_tax_cell(row, 11, f"{total_tax:,.2f}")        # Total Tax ETB
+        self._set_tax_cell(row, 12, f"{tax_doz:,.2f}")          # Tax/doz
+        self._set_tax_cell(row, 13, f"{tax_ps:,.2f}")           # Tax/pcs
 
         # Store tax_ps for landed cost
         product_name_item = self.tax_table.item(row, 1)
@@ -317,22 +336,6 @@ class TaxSetupMixin:
             self._tax_ps_values[product_name_item.text().strip()] = tax_ps
 
         self.tax_table.blockSignals(False)
-
-    def _set_tax_cell(self, row, col, text, editable=False):
-        """Set a table cell with proper flags."""
-        item = self.tax_table.item(row, col)
-        if item:
-            item.setText(text)
-        else:
-            item = QTableWidgetItem(text)
-            self.tax_table.setItem(row, col, item)
-
-        if not editable:
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            item.setBackground(QColor(240, 240, 240))
-        else:
-            item.setFlags(item.flags() | Qt.ItemIsEditable)
-            item.setBackground(QColor(255, 255, 255))
 
     def on_tax_paid_toggled(self, checked):
         """Show/hide bank account selection for tax payment."""

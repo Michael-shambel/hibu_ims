@@ -372,11 +372,8 @@ class ImportShipmentDialog(
             return
 
         tax_usd_rate = self.tax_usd_rate.value()
-        tax_total_usd = self.tax_total_usd.value()
-        tax_sample_frt = self.tax_sample_frt.value()
+        tax_total_freight = self.tax_total_freight.value()
         tax_rater = self.tax_rater.value()
-        freight_ratio_text = self.tax_freight_ratio_label.text()
-        tax_freight_ratio = float(freight_ratio_text) if freight_ratio_text else 0.0
 
         # ---- 2. Helper to get tax cell values ----
         def get_tax_cell_value(row, col):
@@ -451,8 +448,10 @@ class ImportShipmentDialog(
                 tax_usd_doz = get_tax_cell_value(tax_row, 4)
                 tax_total_price_usd = get_tax_cell_value(tax_row, 5)
                 tax_total_price_etb = get_tax_cell_value(tax_row, 6)
-                tax_frt_ct = get_tax_cell_value(tax_row, 8)
-                tax_dpv_ct = get_tax_cell_value(tax_row, 9)
+                tax_first_doz = get_tax_cell_value(tax_row, 7)
+                tax_second_doz = get_tax_cell_value(tax_row, 8)
+                tax_first_total = get_tax_cell_value(tax_row, 9)
+                tax_second_total = get_tax_cell_value(tax_row, 10)
                 tax_total_tax = get_tax_cell_value(tax_row, 11)
                 tax_tax_per_doz = get_tax_cell_value(tax_row, 12)
                 tax_tax_per_piece = get_tax_cell_value(tax_row, 13)
@@ -460,8 +459,10 @@ class ImportShipmentDialog(
                 tax_usd_doz = 0.0
                 tax_total_price_usd = 0.0
                 tax_total_price_etb = 0.0
-                tax_frt_ct = 0.0
-                tax_dpv_ct = 0.0
+                tax_first_doz = 0.0
+                tax_second_doz = 0.0
+                tax_first_total = 0.0
+                tax_second_total = 0.0
                 tax_total_tax = 0.0
                 tax_tax_per_doz = 0.0
                 tax_tax_per_piece = 0.0
@@ -500,8 +501,10 @@ class ImportShipmentDialog(
                 "usd_per_dozen": tax_usd_doz,
                 "total_usd": tax_total_price_usd,
                 "total_price_etb": tax_total_price_etb,
-                "tax_frt_ctn": tax_frt_ct,
-                "tax_dpv_ctn": tax_dpv_ct,
+                "tax_first_dozen": tax_first_doz,
+                "tax_second_dozen": tax_second_doz,
+                "tax_first_etb": tax_first_total,
+                "tax_second_etb": tax_second_total,
                 "total_tax_etb": tax_total_tax,
                 "tax_per_dozen": tax_tax_per_doz,
                 "tax_per_unit": tax_tax_per_piece,
@@ -530,10 +533,8 @@ class ImportShipmentDialog(
             "payment_status": payment_status,
             "payment_date": proforma_date,
             "tax_usd_rate": tax_usd_rate,
-            "tax_total_usd": tax_total_usd,
-            "tax_sample_frt": tax_sample_frt,
+            "tax_total_freight": tax_total_freight,
             "tax_rater": tax_rater,
-            "tax_freight_ratio": tax_freight_ratio,
             "tax_paid": tax_payment_data.get('tax_paid', False),
             "tax_bank_account_id": tax_payment_data.get('bank_account_id'),
             "tax_payment_date": tax_payment_data.get('payment_date'),
@@ -711,11 +712,8 @@ class ImportShipmentDialog(
 
         # ---- Load header tax fields ----
         self.tax_usd_rate.setValue(shipment.tax_usd_rate or 160.0)
-        self.tax_total_usd.setValue(shipment.tax_total_usd or 0.0)
-        self.tax_sample_frt.setValue(shipment.tax_sample_frt or 0.0)   # Now saved
-        self.tax_rater.setValue(shipment.tax_rater or 0.15)
-        if shipment.tax_freight_ratio:
-            self.tax_freight_ratio_label.setText(f"{shipment.tax_freight_ratio:.4f}")
+        self.tax_total_freight.setValue(getattr(shipment, 'tax_total_freight', 0.0) or 0.0)
+        self.tax_rater.setValue(shipment.tax_rater or 0.73755)
 
         # ---- Load tax payment data ----
         if hasattr(shipment, 'tax_paid'):

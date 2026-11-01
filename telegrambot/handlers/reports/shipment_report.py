@@ -125,13 +125,15 @@ def build_shipment_report(shipment, tax_bank_account_name: str = ""):
 
     # ---- 3. Tax data (Tab 3) -----------------------------------------
     usd_rate = float(shipment.tax_usd_rate or 0.0)
-    freight_ratio = float(shipment.tax_freight_ratio or 0.0)
+    total_freight = float(getattr(shipment, 'tax_total_freight', 0.0) or 0.0)
     rater = float(shipment.tax_rater or 0.0)
 
     tax_rows = []
     for p in products:
         total_qty = p.total_quantity or 0
         qty_doz = p.tax_qty_per_doz if p.tax_qty_per_doz else (total_qty / 12.0 if total_qty else 0.0)
+        tax_first_etb = float(p.tax_first_etb or 0.0)
+        tax_second_etb = float(p.tax_second_etb or 0.0)
         tax_rows.append({
             "item_number": p.item_number or "",
             "name": p.product_name or "",
@@ -139,8 +141,10 @@ def build_shipment_report(shipment, tax_bank_account_name: str = ""):
             "usd_per_dozen": float(p.usd_per_dozen or 0.0),
             "total_usd": float(p.total_usd or 0.0),
             "total_price_etb": float(p.total_price_etb or 0.0),
-            "tax_frt_ctn": float(p.tax_frt_ctn or 0.0),
-            "tax_dpv_ctn": float(p.tax_dpv_ctn or 0.0),
+            "tax_first_doz": tax_first_etb / qty_doz if qty_doz else 0.0,
+            "tax_second_doz": tax_second_etb / qty_doz if qty_doz else 0.0,
+            "tax_first_etb": tax_first_etb,
+            "tax_second_etb": tax_second_etb,
             "total_tax_etb": float(p.total_tax_etb or 0.0),
             "tax_per_dozen": float(p.tax_per_dozen or 0.0),
             "tax_per_unit": float(p.tax_per_unit or 0.0),
@@ -241,10 +245,9 @@ def build_shipment_report(shipment, tax_bank_account_name: str = ""):
         "cost_names": [r["type"] for r in cost_rows],
         "tax_rows": tax_rows,
         "usd_rate": usd_rate,
-        "total_usd": float(shipment.tax_total_usd or 0.0),
-        "sample_frt": float(shipment.tax_sample_frt or 0.0),
+        "total_usd": sum(r["total_usd"] for r in tax_rows),
+        "total_freight": total_freight,
         "rater": rater,
-        "freight_ratio": freight_ratio,
         "total_tax": total_tax,
         "landed_rows": landed_rows,
         "grand_total_etb": grand_total_etb,
@@ -489,9 +492,8 @@ def generate_shipment_approval_pdf(shipment, tax_bank_account_name: str = "") ->
     tax_meta = [
         ["USD to ETB Rate", _ratio(data["usd_rate"])],
         ["Total USD", _money(data["total_usd"])],
-        ["Sample Freight (ETB)", _money(data["sample_frt"])],
+        ["Total Freight (ETB)", _money(data["total_freight"])],
         ["Tax Rater", _ratio(data["rater"])],
-        ["Tax Freight Ratio", _ratio(data["freight_ratio"])],
         ["Total Tax Payable (ETB)", _money(data["total_tax"])],
         ["Tax Payment",
          "Paid" if data["tax_paid"] else "Not paid"],
@@ -516,7 +518,7 @@ def generate_shipment_approval_pdf(shipment, tax_bank_account_name: str = "") ->
     story.append(Paragraph("Product Tax Calculation", heading_style))
     tax_header = [
         "Item #", "Product", "Unit", "Qty/doz", "USD/doz", "Total USD",
-        "Total ETB", "FRT Ratio", "FRT/CRT", "DPV/CRT", "Rater",
+        "Total ETB", "Tax 1 /doz", "Tax 2 /doz", "Tax 1 (ETB)", "Tax 2 (ETB)",
         "Total Tax ETB", "Tax/doz", "Tax/pcs",
     ]
     tax_data = [tax_header]
@@ -529,10 +531,10 @@ def generate_shipment_approval_pdf(shipment, tax_bank_account_name: str = "") ->
             _money(r["usd_per_dozen"]),
             _money(r["total_usd"]),
             _money(r["total_price_etb"]),
-            _ratio(data["freight_ratio"]),
-            _money(r["tax_frt_ctn"]),
-            _money(r["tax_dpv_ctn"]),
-            _ratio(data["rater"]),
+            _money(r["tax_first_doz"]),
+            _money(r["tax_second_doz"]),
+            _money(r["tax_first_etb"]),
+            _money(r["tax_second_etb"]),
             _money(r["total_tax_etb"]),
             _money(r["tax_per_dozen"]),
             _money(r["tax_per_unit"]),
