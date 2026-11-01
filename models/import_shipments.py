@@ -34,6 +34,7 @@ class ImportShipment(BaseModel):
     tax_total_usd = Column(Float, nullable=True)
     tax_sample_frt = Column(Float, nullable=True)
     tax_rater = Column(Float, nullable=True)
+    tax_basis = Column(String(20), nullable=True)   # 'fixed' or 'used_cbm'
     tax_freight_ratio = Column(Float, nullable=True)
     tax_paid = Column(Boolean, default=False, nullable=False)
     tax_bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)

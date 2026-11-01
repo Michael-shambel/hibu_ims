@@ -193,7 +193,8 @@ class ImportShipmentService(BaseService):
                 payment_status=payment_status,
                 tax_usd_rate=data.get('tax_usd_rate'),
                 tax_total_freight=data.get('tax_total_freight'),
-                tax_rater=data.get('tax_rater')
+                tax_rater=data.get('tax_rater'),
+                tax_basis=data.get('tax_basis')
             )
             session.add(shipment)
             session.flush()   # ensure shipment gets an ID
@@ -324,6 +325,7 @@ class ImportShipmentService(BaseService):
             shipment.tax_usd_rate = data.get('tax_usd_rate')
             shipment.tax_total_freight = data.get('tax_total_freight')
             shipment.tax_rater = data.get('tax_rater')
+            shipment.tax_basis = data.get('tax_basis')
             shipment.tax_paid = data.get('tax_paid', False)
             shipment.tax_bank_account_id = data.get('tax_bank_account_id')
             shipment.tax_payment_date = data.get('tax_payment_date')

@@ -148,7 +148,7 @@ def build_shipment_report(shipment, tax_bank_account_name: str = ""):
             "total_tax_etb": float(p.total_tax_etb or 0.0),
             "tax_per_dozen": float(p.tax_per_dozen or 0.0),
             "tax_per_unit": float(p.tax_per_unit or 0.0),
-            "unit": "Doz",
+            "unit": p.unit or "pcs",
         })
     total_tax = sum(r["total_tax_etb"] for r in tax_rows)
 
@@ -248,6 +248,7 @@ def build_shipment_report(shipment, tax_bank_account_name: str = ""):
         "total_usd": sum(r["total_usd"] for r in tax_rows),
         "total_freight": total_freight,
         "rater": rater,
+        "tax_basis": getattr(shipment, 'tax_basis', None) or "used_cbm",
         "total_tax": total_tax,
         "landed_rows": landed_rows,
         "grand_total_etb": grand_total_etb,
@@ -494,6 +495,8 @@ def generate_shipment_approval_pdf(shipment, tax_bank_account_name: str = "") ->
         ["Total USD", _money(data["total_usd"])],
         ["Total Freight (ETB)", _money(data["total_freight"])],
         ["Tax Rater", _ratio(data["rater"])],
+        ["Freight CBM Basis",
+         "Fixed Container Capacity" if data["tax_basis"] == "fixed" else "Total Used CBM"],
         ["Total Tax Payable (ETB)", _money(data["total_tax"])],
         ["Tax Payment",
          "Paid" if data["tax_paid"] else "Not paid"],

@@ -535,6 +535,7 @@ class ImportShipmentDialog(
             "tax_usd_rate": tax_usd_rate,
             "tax_total_freight": tax_total_freight,
             "tax_rater": tax_rater,
+            "tax_basis": self.get_tax_basis(),
             "tax_paid": tax_payment_data.get('tax_paid', False),
             "tax_bank_account_id": tax_payment_data.get('bank_account_id'),
             "tax_payment_date": tax_payment_data.get('payment_date'),
@@ -714,6 +715,7 @@ class ImportShipmentDialog(
         self.tax_usd_rate.setValue(shipment.tax_usd_rate or 160.0)
         self.tax_total_freight.setValue(getattr(shipment, 'tax_total_freight', 0.0) or 0.0)
         self.tax_rater.setValue(shipment.tax_rater or 0.73755)
+        self.set_tax_basis(getattr(shipment, 'tax_basis', None) or "used_cbm")
 
         # ---- Load tax payment data ----
         if hasattr(shipment, 'tax_paid'):

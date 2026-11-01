@@ -2,7 +2,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QFormLayout, QLabel,
     QDoubleSpinBox, QHBoxLayout, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QComboBox, QCheckBox,
+    QHeaderView, QSizePolicy, QComboBox, QCheckBox, QRadioButton,
     QMessageBox
 )
 from PySide6.QtCore import Qt, QDate
@@ -13,9 +13,10 @@ from ui.components.ethiopian_date import EthiopianDateEdit
 
 # Customs tax parameters
 #   Tax 1 = Qty/doz * USD/doz * DEFAULT_TAX_RATER * USD->ETB   (per line)
-#   Tax 2 = Total Freight / FREIGHT_TAX_DIVISOR / Qty/doz     (ETB per dozen)
+#   Tax 2 = Total Freight / (CBM basis / CBM per carton) / Qty/doz
+#           CBM basis = fixed container capacity (68) or the shipment's used CBM
 DEFAULT_TAX_RATER = 0.73755
-FREIGHT_TAX_DIVISOR = 2000.0
+FIXED_CONTAINER_CAPACITY = 68.0
 
 
 class TaxSetupMixin:
@@ -73,7 +74,7 @@ class TaxSetupMixin:
 
         self.tax_formula_label = QLabel(
             "Tax 1 = Qty/doz × USD/doz × rater × USD→ETB    •    "
-            "Tax 2 = Total Freight ÷ 2000 ÷ Qty/doz"
+            "Tax 2 = Total Freight ÷ (CBM basis ÷ CBM/ctn) ÷ Qty/doz"
         )
         self.tax_formula_label.setStyleSheet("color: #64748b; font-size: 12px;")
 
@@ -83,8 +84,37 @@ class TaxSetupMixin:
         row2_layout.addWidget(self.tax_formula_label)
         row2_layout.addStretch()
 
+        # ---- Row 3: CBM basis used by the freight tax ----
+        row3_widget = QWidget()
+        row3_layout = QHBoxLayout(row3_widget)
+        row3_layout.setContentsMargins(0, 0, 0, 0)
+        row3_layout.setSpacing(15)
+
+        self.tax_fixed_cbm_radio = QRadioButton("Fixed Container Capacity (68 CBM)")
+        self.tax_used_cbm_radio = QRadioButton("Total Used CBM")
+        self.tax_used_cbm_radio.setChecked(True)
+
+        self.tax_cbm_spin = QDoubleSpinBox()
+        self.tax_cbm_spin.setRange(1.0, 1000.0)
+        self.tax_cbm_spin.setDecimals(1)
+        self.tax_cbm_spin.setValue(FIXED_CONTAINER_CAPACITY)
+        self.tax_cbm_spin.setSuffix(" CBM")
+        self.tax_cbm_spin.setEnabled(False)
+
+        self.tax_fixed_cbm_radio.toggled.connect(self.on_tax_basis_changed)
+        self.tax_used_cbm_radio.toggled.connect(self.on_tax_basis_changed)
+        self.tax_cbm_spin.valueChanged.connect(self.recalculate_tax)
+
+        row3_layout.addWidget(QLabel("Freight CBM Basis:"))
+        row3_layout.addWidget(self.tax_fixed_cbm_radio)
+        row3_layout.addWidget(self.tax_cbm_spin)
+        row3_layout.addSpacing(20)
+        row3_layout.addWidget(self.tax_used_cbm_radio)
+        row3_layout.addStretch()
+
         input_layout.addRow(row1_widget)
         input_layout.addRow(row2_widget)
+        input_layout.addRow(row3_widget)
         layout.addWidget(input_group)
 
         # ---- Product Tax Table (EXPANDS to fill remaining space) ----
@@ -104,7 +134,7 @@ class TaxSetupMixin:
             "USD/doz × rater × USD→ETB rate"
         )
         self.tax_table.horizontalHeaderItem(8).setToolTip(
-            "Total Freight ÷ 2000 ÷ Qty/doz"
+            "Total Freight ÷ (CBM basis ÷ CBM/ctn) ÷ Qty/doz"
         )
         self.tax_table.horizontalHeaderItem(13).setToolTip(
             "Tax/doz ÷ Qty/doz"
@@ -211,6 +241,8 @@ class TaxSetupMixin:
         self._current_total_freight = 0.0
         self._current_rater = DEFAULT_TAX_RATER
         self._current_usd_rate = 160.0
+        self._tax_product_info = {}
+        self._tax_used_cbm = 0.0
         self._tax_bank_account_id = None
         self._tax_paid = False
         self._tax_payment_date = None
@@ -236,10 +268,86 @@ class TaxSetupMixin:
     # because they already use the correct attribute names.
     # ------------------------------------------------------------------
 
+    def on_tax_basis_changed(self):
+        """Enable the capacity box for a fixed basis and recalculate."""
+        self.tax_cbm_spin.setEnabled(self.tax_fixed_cbm_radio.isChecked())
+        self.recalculate_tax()
+
+    def get_tax_basis(self):
+        """Return 'fixed' or 'used_cbm' — which CBM figure Tax 2 divides by."""
+        return "fixed" if self.tax_fixed_cbm_radio.isChecked() else "used_cbm"
+
+    def set_tax_basis(self, basis):
+        """Select the Tax 2 CBM basis ('fixed' or 'used_cbm')."""
+        if basis == "fixed":
+            self.tax_fixed_cbm_radio.setChecked(True)
+        else:
+            self.tax_used_cbm_radio.setChecked(True)
+
+    def _product_info_lookup(self):
+        """Map product name -> unit / CBM per carton / total CBM.
+
+        Read from the shipment product table so the tax tab follows whatever is
+        entered in the Shipment Details tab (unit and carton volume).
+        """
+        lookup = {}
+        table = getattr(self, 'product_table', None)
+        if table is None:
+            return lookup
+
+        for row in range(table.rowCount()):
+            item_number = table.item(row, 0)
+            if item_number and item_number.text() == "TOTAL":
+                continue
+
+            name_widget = table.cellWidget(row, 1)
+            if isinstance(name_widget, ModernLineEdit):
+                name = name_widget.text().strip()
+            else:
+                name_item = table.item(row, 1)
+                name = name_item.text().strip() if name_item else ""
+            if not name:
+                continue
+
+            unit_widget = table.cellWidget(row, 2)
+            if isinstance(unit_widget, ModernLineEdit):
+                unit = unit_widget.text().strip()
+            else:
+                unit_item = table.item(row, 2)
+                unit = unit_item.text().strip() if unit_item else ""
+
+            def _num(col):
+                cell = table.item(row, col)
+                if not cell or not cell.text():
+                    return 0.0
+                try:
+                    return float(cell.text().replace(',', ''))
+                except ValueError:
+                    return 0.0
+
+            lookup[name] = {
+                "unit": unit or "pcs",
+                "cbm_per_carton": _num(8),
+                "total_cbm": _num(9),
+            }
+
+        return lookup
+
+    def _tax_cbm_basis(self):
+        """CBM figure Tax 2 divides by: fixed capacity or used CBM."""
+        if self.tax_fixed_cbm_radio.isChecked():
+            return self.tax_cbm_spin.value()
+        return self._tax_used_cbm
+
     def recalculate_tax(self):
         """Recalculate all tax values when inputs change."""
         if not hasattr(self, 'tax_table') or self.tax_table.rowCount() == 0:
             return
+
+        self._tax_product_info = self._product_info_lookup()
+        self._tax_used_cbm = sum(
+            info["total_cbm"] for info in self._tax_product_info.values()
+        )
 
         usd_rate = self.tax_usd_rate.value()
         total_freight = self.tax_total_freight.value()
@@ -267,7 +375,7 @@ class TaxSetupMixin:
         """Recalculate a single tax row.
 
         Tax 1 (ETB/doz) = USD/doz × rater × USD→ETB rate
-        Tax 2 (ETB/doz) = Total Freight ÷ 2000 ÷ Qty/doz
+        Tax 2 (ETB/doz) = Total Freight ÷ (CBM basis ÷ CBM/ctn) ÷ Qty/doz
 
         The line's total tax is (Tax 1 + Tax 2) × Qty/doz, i.e. the 1st tax plus
         the 2nd tax for that product.
@@ -307,8 +415,19 @@ class TaxSetupMixin:
         tax1_doz = usd_doz * rater * usd_rate
         tax1_total = tax1_doz * qty_doz
 
-        # 2nd tax: freight share for this line
-        tax2_doz = total_freight / FREIGHT_TAX_DIVISOR / qty_doz if qty_doz > 0 else 0.0
+        # 2nd tax: freight share, spread over the cartons this product fills
+        # (CBM basis / CBM per carton), then per dozen.
+        name_item = self.tax_table.item(row, 1)
+        product_name = name_item.text().strip() if name_item else ""
+        cbm_per_carton = self._tax_product_info.get(product_name, {}).get(
+            "cbm_per_carton", 0.0
+        )
+        basis_cbm = self._tax_cbm_basis()
+        if cbm_per_carton > 0 and basis_cbm > 0:
+            capacity_cartons = basis_cbm / cbm_per_carton
+            tax2_doz = total_freight / capacity_cartons / qty_doz
+        else:
+            tax2_doz = 0.0
         tax2_total = tax2_doz * qty_doz
 
         total_tax = tax1_total + tax2_total
@@ -394,6 +513,7 @@ class TaxSetupMixin:
         self.tax_table.blockSignals(True)
         self.tax_table.setRowCount(0)
         self._tax_ps_values = {}
+        product_info_lookup = self._product_info_lookup()
 
         for row in range(self.product_table.rowCount()):
             if self.product_table.item(row, 0) and self.product_table.item(row, 0).text() == "TOTAL":
@@ -432,8 +552,9 @@ class TaxSetupMixin:
             self.tax_table.setItem(new_row, 0, QTableWidgetItem(item_number))
             # Column 1: Product Name
             self.tax_table.setItem(new_row, 1, QTableWidgetItem(product_name))
-            # Column 2: Unit (always "Doz")
-            unit_item = QTableWidgetItem("Doz")
+            # Column 2: Unit — taken from the product row in Shipment Details
+            product_info = product_info_lookup.get(product_name, {})
+            unit_item = QTableWidgetItem(product_info.get("unit") or "pcs")
             unit_item.setFlags(unit_item.flags() & ~Qt.ItemIsEditable)
             unit_item.setBackground(QColor(240, 240, 240))
             self.tax_table.setItem(new_row, 2, unit_item)

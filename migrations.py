@@ -42,6 +42,7 @@ def run_startup_migrations() -> None:
         ensure_column('expenses', 'product_group_id', 'INTEGER REFERENCES product_groups(id)')
         # Customs tax rework: total freight header + the two tax components.
         ensure_column('import_shipments', 'tax_total_freight', 'FLOAT')
+        ensure_column('import_shipments', 'tax_basis', 'VARCHAR(20)')
         ensure_column('shipment_products', 'tax_first_etb', 'FLOAT')
         ensure_column('shipment_products', 'tax_second_etb', 'FLOAT')
     except Exception:
