@@ -1788,7 +1788,9 @@ class NewSaleService(BaseService[ProfessionalSale]):
             ).all()
 
             # Payments on that date – only from credit sales
-            payments = session.query(PaymentTransaction).join(
+            payments = session.query(PaymentTransaction).options(
+                joinedload(PaymentTransaction.bank_account)
+            ).join(
                 SalePaymentTerm,
                 PaymentTransaction.sale_payment_term_id == SalePaymentTerm.id
             ).join(
@@ -1810,6 +1812,25 @@ class NewSaleService(BaseService[ProfessionalSale]):
             total_sales = sum(s.total_amount for s in sales)
             total_payments = sum(p.amount for p in payments)
 
+            # Payments grouped by the account they were paid into, so the
+            # notification can show which bank received the money.
+            bank_totals = {}
+            for payment in payments:
+                account = payment.bank_account
+                key = account.id if account else None
+                if key not in bank_totals:
+                    if account:
+                        display = (
+                            f"{account.bank_name} - {account.account_name}"
+                            if account.bank_name else account.account_name
+                        )
+                    else:
+                        method = payment.payment_method.value if payment.payment_method else ''
+                        display = 'Cash' if method == 'cash' else 'N/A'
+                    bank_totals[key] = {'display': display, 'amount': 0.0, 'count': 0}
+                bank_totals[key]['amount'] += payment.amount or 0.0
+                bank_totals[key]['count'] += 1
+
             return {
                 'sales': sales,
                 'payments': payments,
@@ -1817,6 +1838,9 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 'total_payments_amount': total_payments,
                 'sale_count': len(sales),
                 'payment_count': len(payments),
+                'payments_by_bank': sorted(
+                    bank_totals.values(), key=lambda b: -b['amount']
+                ),
             }
 
     def get_customers_with_daily_activity(self, activity_date: date) -> list:
@@ -1884,26 +1908,37 @@ class NewSaleService(BaseService[ProfessionalSale]):
     def format_daily_activity_summary(customer_name: str, activity_date: date,
                                     opening_balance: float, closing_balance: float,
                                     activity: dict) -> str:
-        lines = [
-            f"📅 *(እለታዊ የዱቤ ማጠቃለያ ለ) {customer_name}*",
+        blocks = [
+            f"📅 *(እለታዊ የዱቤ ማጠቃለያ ለ) {customer_name}*\n"
             f"Date (ቀን): {activity_date.strftime('%d/%m/%Y')}",
-            "",
             f"*የቆየ ቀሪ:* ETB {opening_balance:,.2f}",
-            "",
         ]
+
         if activity['sale_count'] > 0:
-            lines.append(f"🛒 *(አዲስ የገባ የዱቤ ሽያጭ):* {activity['sale_count']} sale(s)   →   + ETB {activity['total_sales_amount']:,.2f}\n")
+            blocks.append(
+                f"🛒 *(አዲስ የገባ የዱቤ ሽያጭ):* {activity['sale_count']} sale(s)"
+                f"   →   + ETB {activity['total_sales_amount']:,.2f}"
+            )
+
         if activity['payment_count'] > 0:
-            lines.append(f"💰 *(የተከፈለ):* {activity['payment_count']} ክፍያዎች   →   - ETB {activity['total_payments_amount']:,.2f}\n")
-        lines.append("")
-        lines.append(f"*ጠቅላላ ቀሪ:* ETB {closing_balance:,.2f}\n\n")
-        lines.append(f"*የአከፋፈል ሁኔታውን ለማየት ከታች የተላከውን pdf ይመልከቱ*\n")
-        lines.append(f"*የተላከሎትን ወይም የወሰዱትን እቃዎች ለማየት ወይም በፈልጉት ሰአት የአከፋፈል ሁኔታ ለማየት*\n")
-        lines.append(f"*start menu -> customer/ደንብኛ -> credit item history ወይም credit payment history ይንኩ፡፡*\n\n")
-        lines.append(f"*==================================================*\n\n")
-        lines.append(f"*developed by: Megazen Systems*\n")
-        lines.append(f"contact us: @Megazenapp/ +251974250852")
-        return "\n".join(lines)
+            payment_lines = [
+                f"💰 *(የተከፈለ):* {activity['payment_count']} ክፍያዎች"
+                f"   →   - ETB {activity['total_payments_amount']:,.2f}"
+            ]
+            for bank in activity.get('payments_by_bank') or []:
+                payment_lines.append(
+                    f"🏦 {bank['display']}: ETB {bank['amount']:,.2f}"
+                )
+            blocks.append("\n".join(payment_lines))
+
+        blocks.append(f"*ጠቅላላ ቀሪ:* ETB {closing_balance:,.2f}")
+
+        return (
+            "\n\n".join(blocks)
+            + "\n\n*==================================================*\n\n\n"
+            + "*developed by: Megazen Systems*\n\n"
+            + "contact us: @Megazenapp/ +251974250852"
+        )
     
     def _refresh_json_cache_from_db(self):
         """Refresh JSON daily cache from database after deletion."""
