@@ -30,7 +30,15 @@ class BankTransactionService(BaseService[BankTransaction]):
                 if reset_date:
                     query = query.filter(BankTransaction.transaction_date >= reset_date)
                 
-                latest_tx = query.order_by(desc(BankTransaction.id)).first()
+                # Order by the transaction DATE first, then id: a back-dated
+                # deposit/payment must not be treated as the newest balance.
+                # get_payment_balance_shortfalls() reads this value to decide
+                # whether to prompt for a deposit, so a stale balance here
+                # silently breaks that prompt.
+                latest_tx = query.order_by(
+                    BankTransaction.transaction_date.desc(),
+                    BankTransaction.id.desc()
+                ).first()
                 if latest_tx:
                     return float(latest_tx.balance_after)
                 return 0.0

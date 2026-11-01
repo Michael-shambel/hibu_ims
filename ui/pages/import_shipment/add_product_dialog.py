@@ -1,9 +1,9 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFormLayout, QGroupBox, QWidget, QMessageBox
+    QFormLayout, QGroupBox, QWidget, QMessageBox, QScrollArea, QFrame
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QGuiApplication
 
 from ui.pages.product_dialog import ModernLineEdit, ModernSpinBox, ModernDoubleSpinBox, ProductCompleter, ShipmentProductCompleter
 class AddProductLineDialog(QDialog):
@@ -14,8 +14,12 @@ class AddProductLineDialog(QDialog):
         self.product_service = product_service
         self.setWindowTitle("Add Product Line")
         self.setModal(True)
-        self.setMinimumWidth(550)
-        self.setMaximumHeight(650)
+
+        # Size against the actual screen. The old fixed setMaximumHeight(650)
+        # was taller than the usable area on small laptops / high-DPI screens,
+        # so the form was squeezed and the Cancel / Add buttons were pushed out
+        # of view. See _fit_to_screen() and the scroll area in init_ui().
+        self._fit_to_screen(parent, preferred_width=600, preferred_height=760)
         
         # Enable minimize/maximize
         self.setWindowFlags(
@@ -27,6 +31,40 @@ class AddProductLineDialog(QDialog):
         self.setWindowModality(Qt.WindowModal)
         
         self.init_ui()
+
+    def _fit_to_screen(self, parent, preferred_width: int, preferred_height: int):
+        """Clamp the dialog to the usable area of the screen it opens on.
+
+        Sizes are computed from the screen the parent window is on, so the same
+        build behaves correctly on a 1366x768 laptop and on a large monitor.
+        """
+        screen = None
+        try:
+            if parent is not None:
+                screen = parent.screen()
+        except Exception:
+            screen = None
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+
+        if screen is None:
+            # No screen information available - keep a sane fallback.
+            self.setMinimumWidth(480)
+            self.resize(preferred_width, preferred_height)
+            return
+
+        available = screen.availableGeometry()
+        # Leave room for the taskbar, shadows and window framing.
+        max_width = max(380, available.width() - 60)
+        max_height = max(320, available.height() - 80)
+
+        self.setMinimumWidth(min(550, max_width))
+        self.setMaximumWidth(max_width)
+        self.setMaximumHeight(max_height)
+        self.resize(
+            min(preferred_width, max_width),
+            min(preferred_height, max_height),
+        )
         
     def init_ui(self):
         """Build the add product dialog UI."""
@@ -88,7 +126,20 @@ class AddProductLineDialog(QDialog):
         self.cbm_input.spin_box.valueChanged.connect(self.update_preview)
         form_layout.addRow("CBM/Carton:", self.cbm_input)
         
-        main_layout.addWidget(form_widget)
+        # --- Scrollable body -------------------------------------------------
+        # The form and preview scroll when the window is short; the buttons stay
+        # outside this area so they are ALWAYS reachable, whatever the screen.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(15)
+        body_layout.addWidget(form_widget)
         
         # --- Preview Section ---
         preview_group = QGroupBox("Preview")
@@ -120,9 +171,13 @@ class AddProductLineDialog(QDialog):
         preview_layout.addStretch()
         preview_layout.addWidget(self.preview_cbm_label)
         
-        main_layout.addWidget(preview_group)
+        body_layout.addWidget(preview_group)
+        body_layout.addStretch()
+
+        scroll.setWidget(body)
+        main_layout.addWidget(scroll, 1)
         
-        # --- Buttons ---
+        # --- Buttons (pinned below the scroll area) ---
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
         

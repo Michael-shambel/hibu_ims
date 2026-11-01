@@ -61,7 +61,15 @@ def notify_store_team_sync(message: str, sale_id: int = None, purchase_id: int =
             AuthUser.chat_id.isnot(None),
             AuthUser.is_deleted == False
         ).all()
+        # Queue only once per distinct chat. If two accounts share a chat (e.g.
+        # several users point at one shared group), the queue-level dedup would
+        # collapse the duplicates anyway, but this avoids the redundant work and
+        # keeps the logic explicit: one order = one message per chat.
+        seen_chat_ids = set()
         for user in users:
+            if user.chat_id in seen_chat_ids:
+                continue
+            seen_chat_ids.add(user.chat_id)
             payload = {'text': message, 'parse_mode': 'HTML'}
             if sale_id:
                 payload['sale_id'] = str(sale_id)
@@ -69,9 +77,10 @@ def notify_store_team_sync(message: str, sale_id: int = None, purchase_id: int =
                 payload['purchase_id'] = str(purchase_id)   # new
             queue_notification(notification_type, user.chat_id, payload, skip_dedup)
 
-def notify_customer_sync(customer_id: int, target_date: date = None, sale_id: int = None):
+def notify_customer_sync(customer_id: int, target_date: date = None, sale_id: int = None, skip_dedup: bool = True):
     """Queue a customer daily summary notification for the customer + admin copy.
-    Uses skip_dedup=True to ensure a notification is sent for every credit sale."""
+    Real-time sale events keep skip_dedup=True so every credit sale notifies;
+    scheduler catch-up passes skip_dedup=False so replays are deduplicated."""
     if target_date is None:
         target_date = date.today()
     customer_svc = CustomerService()
@@ -83,17 +92,18 @@ def notify_customer_sync(customer_id: int, target_date: date = None, sale_id: in
     # Customer – always queue (skip dedup)
     queue_notification('customer_summary', customer.chat_id,
                        {'customer_id': customer_id, 'target_date': today_iso, 'sale_id': sale_id},
-                       skip_dedup=True)
+                       skip_dedup=skip_dedup)
     # Admin copy – always queue (skip dedup)
     queue_notification('customer_summary_admin', ADMIN_ID,
                        {'customer_id': customer_id, 'target_date': today_iso,
                         'customer_name': customer.name, 'sale_id': sale_id},
-                       skip_dedup=True)
+                       skip_dedup=skip_dedup)
 
 
-def notify_supplier_purchase_sync(supplier_id: int, target_date: date = None, purchase_id: int = None):
+def notify_supplier_purchase_sync(supplier_id: int, target_date: date = None, purchase_id: int = None, skip_dedup: bool = True):
     """Queue supplier daily summary notification for all linked contacts + admin copy.
-    Uses skip_dedup=True for every purchase."""
+    Real-time purchase events keep skip_dedup=True; scheduler catch-up passes
+    skip_dedup=False so replays are deduplicated."""
     if target_date is None:
         target_date = date.today()
     supplier_svc = SupplierService()
@@ -105,14 +115,14 @@ def notify_supplier_purchase_sync(supplier_id: int, target_date: date = None, pu
     for chat_id in chat_ids:
         queue_notification('supplier_summary', chat_id,
                            {'supplier_id': supplier_id, 'target_date': today_iso, 'purchase_id': purchase_id},
-                           skip_dedup=True)
+                           skip_dedup=skip_dedup)
     # Admin copy
     supplier = supplier_svc.get_by_id(supplier_id)
     supplier_name = supplier.supplier_name if supplier else ''
     queue_notification('supplier_summary_admin', ADMIN_ID,
                        {'supplier_id': supplier_id, 'target_date': today_iso,
                         'supplier_name': supplier_name, 'purchase_id': purchase_id},
-                       skip_dedup=True)
+                       skip_dedup=skip_dedup)
 
 
 def send_notification_to_admin_sync(message: str):

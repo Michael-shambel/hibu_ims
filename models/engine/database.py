@@ -2,11 +2,12 @@
 import os
 import logging
 from typing import Generator
-from sqlalchemy import create_engine, MetaData, Column, DateTime, Integer, Boolean, String
+from sqlalchemy import create_engine, MetaData, Column, DateTime, Integer, Boolean, String, event
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import func
+from sqlalchemy.pool import NullPool
 from utils import resource_path
 import uuid
 
@@ -33,7 +34,18 @@ class DatabaseManager:
                 db_url,
                 echo=False,
                 connect_args={"check_same_thread": False, "timeout": 30} if "sqlite" in db_url else {},
+                poolclass=NullPool if "sqlite" in db_url else None,
             )
+
+            if "sqlite" in db_url:
+                @event.listens_for(engine, "connect")
+                def _set_sqlite_pragma(dbapi_connection, connection_record):
+                    cursor = dbapi_connection.cursor()
+                    cursor.execute("PRAGMA journal_mode=WAL")
+                    cursor.execute("PRAGMA synchronous=NORMAL")
+                    cursor.execute("PRAGMA busy_timeout=30000")
+                    cursor.close()
+
             logger.info("Database engine initialized")
             return engine
 

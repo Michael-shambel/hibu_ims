@@ -1,14 +1,18 @@
 import logging
 import json
+import hashlib
 import asyncio
 import os
 import re
 import zipfile
 from datetime import datetime, timedelta
 from io import BytesIO
+import threading
 
+import httpx
 from telegram import Bot
 from telegram.request import HTTPXRequest
+from telegram.error import TimedOut, NetworkError
 from sqlalchemy.orm import joinedload
 
 from models.pending_notification import PendingNotification
@@ -18,8 +22,10 @@ from config import BOT_TOKEN, ADMIN_ID
 logger = logging.getLogger(__name__)
 
 # Timeouts
-_FAST_SEND_TIMEOUT = 60.0          # order_notification, admin alerts
-_REPORT_SEND_TIMEOUT = 240.0       # PDF reports (was 60.0)
+_FAST_SEND_TIMEOUT = 300.0          # order_notification, admin alerts
+# (was 120.0: asyncio.wait_for fired long before the 600s HTTP read timeout,
+#  abandoning acks for messages Telegram HAD delivered -> retry -> duplicates)
+_REPORT_SEND_TIMEOUT = 720.0       # PDF reports (was 60.0)
 
 # Telegram's Bot API rejects document uploads over 50 MB. Keep a small margin
 # so a request is never sent only to be rejected.
@@ -36,16 +42,34 @@ REPORT_NOTIFICATION_TYPES = {
     'database_backup',
 }
 
+# Raw .db uploads (the daily database backup) are the app's only offsite copy.
+# A timeout or ambiguous network error means we cannot know whether Telegram
+# accepted the file, so these notifications are RETRIED instead of being
+# marked 'sent' like every other type. A duplicate snapshot is harmless; a
+# silently skipped one leaves the admin with no backup at all.
+_DB_FILE_EXTENSION = '.db'
+
+
+def _is_db_file_notification(notification_type: str, payload: dict) -> bool:
+    """True when this notification uploads a raw .db file."""
+    if notification_type == 'database_backup':
+        return True
+    file_path = payload.get('file_path') or payload.get('file_name') or ''
+    return isinstance(file_path, str) and file_path.lower().endswith(_DB_FILE_EXTENSION)
+
+
+_queue_lock = threading.Lock()
+
 # ---------------------------------------------------------------------
 # Bot factory with longer HTTP timeouts
 # ---------------------------------------------------------------------
 def _make_bot() -> Bot:
     """Create a Bot instance with generous HTTP timeouts to avoid false timeouts."""
     request = HTTPXRequest(
-        connect_timeout=10.0,
-        read_timeout=300.0,          # large PDF uploads need more time
-        write_timeout=30.0,
-        pool_timeout=5.0,
+        connect_timeout=30.0,
+        read_timeout=600.0,          # large PDF uploads need more time
+        write_timeout=60.0,
+        pool_timeout=10.0,
     )
     return Bot(token=BOT_TOKEN, request=request)
 
@@ -113,25 +137,25 @@ def _get_dedup_key(notification_type: str, payload: dict, chat_id: int):
         sale_id = payload.get('sale_id')
         if sale_id is not None:
             return ('order_notification', sale_id, chat_id)
-        return ('order_notification', hash(payload.get('text', '')), chat_id)
+        return ('order_notification', _text_hash(payload.get('text', '')), chat_id)
     
     elif notification_type == 'despatch_notification':
         sale_id = payload.get('sale_id')
         if sale_id is not None:
             return ('despatch_notification', sale_id, chat_id)
-        return ('despatch_notification', hash(payload.get('text', '')), chat_id)
+        return ('despatch_notification', _text_hash(payload.get('text', '')), chat_id)
     
     elif notification_type == 'sale_cancellation':
         sale_id = payload.get('sale_id')
         if sale_id is not None:
             return (notification_type, sale_id, chat_id)
-        return (notification_type, hash(payload.get('text', '')), chat_id)
+        return (notification_type, _text_hash(payload.get('text', '')), chat_id)
     
     elif notification_type == 'purchase_notification':
         purchase_id = payload.get('purchase_id')
         if purchase_id is not None:
             return (notification_type, purchase_id, chat_id)
-        return (notification_type, hash(payload.get('text', '')), chat_id)
+        return (notification_type, _text_hash(payload.get('text', '')), chat_id)
 
     elif notification_type == 'shipment_approval_report':
         return (notification_type, payload.get('shipment_id'))
@@ -140,6 +164,45 @@ def _get_dedup_key(notification_type: str, payload: dict, chat_id: int):
         return ('database_backup', payload.get('file_path'))
 
     return None
+
+# ---------------------------------------------------------------------
+# Stable text hash + catch-up-aware key matching
+# ---------------------------------------------------------------------
+def _text_hash(text: str) -> str:
+    # Stable across restarts (hash() is randomized per process, so text-based
+    # dedup keys changed on every restart and duplicates slipped through).
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+_SUMMARY_ID_FIELDS = {
+    'customer_summary': 'sale_id',
+    'customer_summary_admin': 'sale_id',
+    'supplier_summary': 'purchase_id',
+    'supplier_summary_admin': 'purchase_id',
+}
+
+
+def _keys_match(notification_type: str, new_payload: dict, candidate_payload: dict, chat_id: int) -> bool:
+    """True when a queued notification is the same event as a stored one.
+
+    A real-time event carries a sale_id/purchase_id, while the scheduler
+    catch-up for the same day does not. Comparing both keys with the id field
+    removed makes the catch-up recognise the event-based message it would
+    otherwise resend.
+    """
+    new_key = _get_dedup_key(notification_type, new_payload, chat_id)
+    cand_key = _get_dedup_key(notification_type, candidate_payload, chat_id)
+    if new_key is None or cand_key is None:
+        return False
+    if new_key == cand_key:
+        return True
+    id_field = _SUMMARY_ID_FIELDS.get(notification_type)
+    if id_field and new_payload.get(id_field) is None:
+        strip = lambda p: {k: v for k, v in p.items() if k != id_field}
+        return (
+            _get_dedup_key(notification_type, strip(new_payload), chat_id)
+            == _get_dedup_key(notification_type, strip(candidate_payload), chat_id)
+        )
+    return False
 
 # ---------------------------------------------------------------------
 # Duplicate check for pending notifications
@@ -160,7 +223,7 @@ def _is_duplicate(session, notification_type: str, payload: dict, chat_id: int) 
     for notif in candidates:
         try:
             pl = json.loads(notif.payload_json)
-            if _get_dedup_key(notification_type, pl, chat_id) == key:
+            if _keys_match(notification_type, payload, pl, chat_id):
                 return True
         except Exception:
             continue
@@ -186,7 +249,7 @@ def _has_sent_duplicate(notification_type: str, payload: dict, chat_id: int) -> 
         for notif in candidates:
             try:
                 pl = json.loads(notif.payload_json)
-                if _get_dedup_key(notification_type, pl, chat_id) == key:
+                if _keys_match(notification_type, payload, pl, chat_id):
                     return True
             except Exception:
                 continue
@@ -216,19 +279,22 @@ def _mark_step_done(notif_id: int, step: str):
 # Queue notification
 # ---------------------------------------------------------------------
 def queue_notification(notification_type: str, chat_id: int, payload: dict, skip_dedup: bool = False):
-    with get_session() as session:
-        if not skip_dedup and _is_duplicate(session, notification_type, payload, chat_id):
-            logger.debug("Skipping duplicate %s for chat_id %s", notification_type, chat_id)
-            return
+    # Serialised so two threads (UI event + scheduler) can never both pass the
+    # duplicate check and insert the same row.
+    with _queue_lock:
+        with get_session() as session:
+            if not skip_dedup and _is_duplicate(session, notification_type, payload, chat_id):
+                logger.debug("Skipping duplicate %s for chat_id %s", notification_type, chat_id)
+                return
 
-        notif = PendingNotification(
-            notification_type=notification_type,
-            chat_id=chat_id,
-            payload_json=json.dumps(payload),
-        )
-        session.add(notif)
-        session.commit()
-    logger.debug("Queued %s for chat_id %s", notification_type, chat_id)
+            notif = PendingNotification(
+                notification_type=notification_type,
+                chat_id=chat_id,
+                payload_json=json.dumps(payload),
+            )
+            session.add(notif)
+            session.commit()
+        logger.debug("Queued %s for chat_id %s", notification_type, chat_id)
 
 # ---------------------------------------------------------------------
 # Reset stuck notifications
@@ -236,10 +302,12 @@ def queue_notification(notification_type: str, chat_id: int, payload: dict, skip
 def reset_failed_pending_notifications():
     with get_session() as session:
         cooldown = datetime.utcnow() - timedelta(hours=1)
+        max_age = datetime.utcnow() - timedelta(hours=12)
         stuck = session.query(PendingNotification).filter(
             PendingNotification.status == 'pending',
             PendingNotification.retry_count >= PendingNotification.max_retries,
-            PendingNotification.next_retry_time <= cooldown
+            PendingNotification.next_retry_time <= cooldown,
+            PendingNotification.created_at >= max_age
         ).all()
 
         for notif in stuck:
@@ -253,6 +321,115 @@ def reset_failed_pending_notifications():
         if stuck:
             session.commit()
             logger.info("Reset %d stuck notifications", len(stuck))
+
+# ---------------------------------------------------------------------
+# Single-writer claim + recent-dispatch guard
+# ---------------------------------------------------------------------
+# These two guards close the remaining duplicate windows of an at-least-once
+# outbox:
+#  * _claim_for_send()  – a DB compare-and-swap so two overlapping cycles
+#    (double app instance, scheduler restart race) can never both send the
+#    same row. A claim left behind by a crashed worker expires after
+#    _CLAIM_STALE_SECONDS so the row is eventually retried.
+#  * _was_recently_dispatched() – in-process memory of messages this process
+#    already delivered. If the 'sent' bookkeeping write afterwards keeps
+#    failing (DB lock/IO), the old code resent the SAME message on every
+#    20-second cycle -> 2-4+ identical copies per phone. The guard makes
+#    those later cycles mark the row 'sent' without sending again.
+
+_CLAIM_STALE_SECONDS = 1500      # 25 min – max plausible time for one send
+_SIMPLE_SEND_TYPES = {
+    'order_notification', 'despatch_confirmation', 'despatch_notification',
+    'admin_copy', 'unusual_alert', 'generic_message', 'sale_cancellation',
+    'purchase_notification', 'database_backup',
+}
+_RECENT_DISPATCH_TTL_SECONDS = 2 * 3600
+_recent_dispatch_lock = threading.Lock()
+_recent_dispatches = {}          # dedup key -> datetime it was last delivered
+
+
+def _claim_for_send(notif_id: int) -> bool:
+    """Atomically mark a pending row as being processed by this cycle.
+
+    Returns False when the row is not pending anymore or another worker has
+    claimed it recently (i.e. is actively sending it) – the caller must then
+    skip the row so it is never sent twice. A claim made by THIS process is
+    always refreshed (retries after a genuine failure must be allowed), while
+    a fresh claim from another process blocks the row until it goes stale
+    (crashed worker) or that process marks the row 'sent'.
+    """
+    pid = os.getpid()
+    claim_ts = datetime.utcnow().isoformat()
+    try:
+        with get_session() as session:
+            notif = session.query(PendingNotification).get(notif_id)
+            if not notif or notif.status != 'pending':
+                return False
+            try:
+                pl = json.loads(notif.payload_json)
+            except Exception:
+                pl = {}
+            prev_pid = pl.get('_claim_pid')
+            prev = pl.get('_claim_ts')
+            if prev and prev_pid != pid:
+                try:
+                    prev_dt = datetime.fromisoformat(prev)
+                    if (datetime.utcnow() - prev_dt).total_seconds() < _CLAIM_STALE_SECONDS:
+                        # Fresh claim by another worker -> it is actively sending this row.
+                        return False
+                except Exception:
+                    pass
+            pl['_claim_ts'] = claim_ts
+            pl['_claim_pid'] = pid
+            new_payload_json = json.dumps(pl)
+            updated = session.query(PendingNotification).filter(
+                PendingNotification.id == notif_id,
+                PendingNotification.status == 'pending',
+                PendingNotification.payload_json == notif.payload_json
+            ).update(
+                {PendingNotification.payload_json: new_payload_json},
+                synchronize_session=False
+            )
+            session.commit()
+            return updated == 1
+    except Exception as e:
+        # DB contention etc. – be conservative: skip this row this cycle.
+        logger.debug("Could not claim notification %d: %s", notif_id, e)
+        return False
+
+
+def _remember_dispatched(notification_type: str, payload: dict, chat_id: int):
+    """Record that this process already delivered this notification content."""
+    key = _get_dedup_key(notification_type, payload, chat_id)
+    if key is None:
+        return
+    global _recent_dispatches
+    now = datetime.utcnow()
+    with _recent_dispatch_lock:
+        if len(_recent_dispatches) > 10000:
+            cutoff = now - timedelta(seconds=_RECENT_DISPATCH_TTL_SECONDS)
+            _recent_dispatches = {k: v for k, v in _recent_dispatches.items() if v >= cutoff}
+        _recent_dispatches[key] = now
+
+
+def _was_recently_dispatched(notification_type: str, payload: dict, chat_id: int) -> bool:
+    """True if this process already delivered the same content within the TTL.
+    Multi-step report types are excluded – they keep their own per-step
+    bookkeeping (_sent_steps) and must still be allowed to retry."""
+    if notification_type not in _SIMPLE_SEND_TYPES:
+        return False
+    key = _get_dedup_key(notification_type, payload, chat_id)
+    if key is None:
+        return False
+    now = datetime.utcnow()
+    with _recent_dispatch_lock:
+        last = _recent_dispatches.get(key)
+        if last is None:
+            return False
+        if (now - last).total_seconds() < _RECENT_DISPATCH_TTL_SECONDS:
+            return True
+        _recent_dispatches.pop(key, None)
+    return False
 
 # ---------------------------------------------------------------------
 # Outbox processor
@@ -293,6 +470,7 @@ async def process_pending_notifications():
         chat_id = row['chat_id']
         retry_count = row['retry_count']
 
+        payload = {}
         try:
             payload = json.loads(row['payload_json'])
 
@@ -307,23 +485,113 @@ async def process_pending_notifications():
                 await asyncio.to_thread(_mark_sent, notif_id)
                 continue
 
+            # Single-writer claim: if another cycle/process already grabbed this
+            # row, do NOT send it again.
+            if not await asyncio.to_thread(_claim_for_send, notif_id):
+                logger.debug("Notification %d (type %s) claimed by another cycle; skipping", notif_id, nt)
+                continue
+
+            # If this process already delivered this exact content recently
+            # (e.g. a previous cycle sent it but failed to mark it 'sent'),
+            # just finish the bookkeeping – never send a second copy.
+            if _was_recently_dispatched(nt, payload, chat_id):
+                logger.info(
+                    "Notification %d (type %s) already dispatched recently; marking sent without sending",
+                    notif_id, nt
+                )
+                await asyncio.to_thread(_mark_sent, notif_id)
+                continue
+
             # Dispatch with notif_id for step tracking
             await _dispatch_notification(bot, nt, chat_id, payload, notif_id)
+            _remember_dispatched(nt, payload, chat_id)
+
+        except (asyncio.TimeoutError, TimedOut) as e:
+            if _is_db_file_notification(nt, payload):
+                # .db upload: a timed-out snapshot upload must not be written off
+                # as sent – retry it and let the admin receive it late.
+                logger.warning(
+                    "Notification %d (type %s) timed out uploading a .db file; will retry: %s",
+                    notif_id, nt, e
+                )
+                await _mark_for_retry(notif_id, nt, retry_count, e)
+                continue
+
+            logger.warning(
+                "Notification %d (type %s) timed out awaiting ack; assuming delivered, not retrying: %s",
+                notif_id, nt, e
+            )
+            # Likely delivered – remember it so a retry can never resend it.
+            _remember_dispatched(nt, payload, chat_id)
             await asyncio.to_thread(_mark_sent, notif_id)
-            logger.debug("Sent notification %d (type %s)", notif_id, nt)
+            continue
+
+        except NetworkError as e:
+            cause = e.__cause__
+            not_yet_sent = isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout))
+
+            if not_yet_sent:
+                logger.warning(
+                    "Notification %d (type %s) failed before reaching Telegram (%s); will retry: %s",
+                    notif_id, nt, type(cause).__name__, e
+                )
+                await _mark_for_retry(notif_id, nt, retry_count, e)
+            elif _is_db_file_notification(nt, payload):
+                # .db upload: never assume it landed – retry it.
+                logger.warning(
+                    "Notification %d (type %s) hit an ambiguous network error (%s) while "
+                    "uploading a .db file; will retry: %s",
+                    notif_id, nt, type(cause).__name__ if cause else "unknown", e
+                )
+                await _mark_for_retry(notif_id, nt, retry_count, e)
+            else:
+                logger.warning(
+                    "Notification %d (type %s) hit an ambiguous network error (%s) after the request "
+                    "may have been sent; assuming delivered, not retrying: %s",
+                    notif_id, nt, type(cause).__name__ if cause else "unknown", e
+                )
+                # May have been delivered – remember it so a retry can never resend it.
+                _remember_dispatched(nt, payload, chat_id)
+                await asyncio.to_thread(_mark_sent, notif_id)
+            continue
 
         except Exception as e:
-            new_retry = retry_count + 1
-            if nt in REPORT_NOTIFICATION_TYPES:
-                delay_seconds = min(3600, 30 * (2 ** (new_retry - 1)))
-            else:
-                delay_seconds = min(3600, 15 * (2 ** (new_retry - 1)))
-            next_retry = datetime.utcnow() + timedelta(seconds=delay_seconds)
-            await asyncio.to_thread(_mark_failed, notif_id, new_retry, next_retry, str(e)[:500])
+            # Dispatch itself never completed - safe to retry, nothing was sent.
+            await _mark_for_retry(notif_id, nt, retry_count, e)
             logger.warning(
                 "Notification %d (type %s) failed (attempt %d): %s",
-                notif_id, nt, new_retry, e
+                notif_id, nt, retry_count + 1, e
             )
+            continue
+        try:
+            await asyncio.to_thread(_mark_sent, notif_id)
+            logger.debug("Sent notification %d (type %s)", notif_id, nt)
+        except Exception as e:
+            logger.critical(
+                "Notification %d (type %s) was DELIVERED but could not be marked "
+                "'sent' (DB error: %s). Retrying the bookkeeping write only - "
+                "it will NOT be resent to Telegram.",
+                notif_id, nt, e
+            )
+            for attempt in range(3):
+                await asyncio.sleep(1)
+                try:
+                    await asyncio.to_thread(_mark_sent, notif_id)
+                    logger.info("Notification %d marked sent after retry %d", notif_id, attempt + 1)
+                    break
+                except Exception as e2:
+                    logger.critical(
+                        "Retry %d/3 to mark notification %d as sent failed: %s",
+                        attempt + 1, notif_id, e2
+                    )
+            else:
+                logger.critical(
+                    "Notification %d (type %s) STILL not marked sent after 3 retries. "
+                    "It remains 'pending' and will be picked up again next cycle - "
+                    "if the underlying send already succeeded, that next attempt "
+                    "will be a genuine duplicate. Investigate the DB error above.",
+                    notif_id, nt
+                )
 
 # ---------------------------------------------------------------------
 # Mark status helpers
@@ -344,6 +612,18 @@ def _mark_failed(notif_id: int, retry_count: int, next_retry: datetime, error: s
             notif.last_error = error
             session.commit()
 
+
+async def _mark_for_retry(notif_id: int, notification_type: str, retry_count: int, error) -> None:
+    """Bump the retry counter and schedule the next attempt with the standard
+    exponential backoff (60s for reports, 30s otherwise, capped at 1 hour)."""
+    new_retry = retry_count + 1
+    if notification_type in REPORT_NOTIFICATION_TYPES:
+        delay_seconds = min(3600, 60 * (2 ** (new_retry - 1)))
+    else:
+        delay_seconds = min(3600, 30 * (2 ** (new_retry - 1)))
+    next_retry = datetime.utcnow() + timedelta(seconds=delay_seconds)
+    await asyncio.to_thread(_mark_failed, notif_id, new_retry, next_retry, str(error)[:500])
+
 def _has_pending_duplicate(notification_type: str, payload: dict, chat_id: int, exclude_id: int) -> bool:
     key = _get_dedup_key(notification_type, payload, chat_id)
     if key is None:
@@ -359,7 +639,7 @@ def _has_pending_duplicate(notification_type: str, payload: dict, chat_id: int, 
         for notif in candidates:
             try:
                 pl = json.loads(notif.payload_json)
-                if _get_dedup_key(notification_type, pl, chat_id) == key:
+                if _keys_match(notification_type, payload, pl, chat_id):
                     return True
             except Exception:
                 continue

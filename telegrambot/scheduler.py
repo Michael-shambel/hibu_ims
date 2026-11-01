@@ -254,7 +254,8 @@ async def queue_daily_customer_notifications(target_date: date = None):
 
     for cid in customer_ids:
         try:
-            notify_customer_sync(cid, target_date=target_date)
+            # skip_dedup=False: customers already notified for this day are skipped
+            notify_customer_sync(cid, target_date=target_date, skip_dedup=False)
         except Exception as e:
             logger.error("Failed to queue customer notification for %d: %s", cid, e)
         await asyncio.sleep(0.05)
@@ -281,7 +282,8 @@ async def queue_daily_supplier_notifications(target_date: date = None):
 
     for sid in supplier_ids:
         try:
-            notify_supplier_purchase_sync(sid, target_date=target_date)
+            # skip_dedup=False: suppliers already notified for this day are skipped
+            notify_supplier_purchase_sync(sid, target_date=target_date, skip_dedup=False)
         except Exception as e:
             logger.error("Failed to queue supplier notification for %d: %s", sid, e)
         await asyncio.sleep(0.05)
@@ -300,7 +302,9 @@ async def startup_catchup():
         with get_session() as session:
             last_sent = session.query(PendingNotification.payload_json).filter(
                 PendingNotification.notification_type == 'daily_sales_report',
-                PendingNotification.status == 'sent'
+                # 'pending' counts too: a report already queued for a day must not
+                # be queued a second time by the catch-up.
+                PendingNotification.status.in_(['pending', 'sent'])
             ).order_by(PendingNotification.created_at.desc()).first()
 
             if last_sent:
@@ -327,8 +331,10 @@ async def startup_catchup():
         missing_dates = []
         d = last_date + timedelta(days=1)
 
+        earliest = today - timedelta(days=7)
         while d <= yesterday:
-            missing_dates.append(d)
+            if d >= earliest:
+                missing_dates.append(d)
             d += timedelta(days=1)
 
         # Include today only if past the 18:30 scheduled time
