@@ -11,6 +11,7 @@ from PySide6.QtGui import QFont, QCursor, QColor
 from functools import partial
 from datetime import date, timedelta, datetime
 from ui.components.ethiopian_date import EthiopianDateConverter
+from ui.components import theme
 from ui.pages.credit_payment_dialog import CreditPaymentDialog
 from services.new_sale_service import NewSaleService
 from services.expense_service import ExpenseService
@@ -1353,76 +1354,92 @@ class SaleItemsDialog(QDialog):
         self.setGeometry(screen_geometry)
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        content_widget = QWidget()
+        content_widget.setStyleSheet(f"background-color: {theme.CANVAS};")
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(24, 24, 24, 24)
+        content_layout.setSpacing(14)
+
+        # ==================== HEADER ====================
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(12)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+
+        title_label = QLabel(self.windowTitle() or "Sale Items")
+        title_label.setFont(QFont(theme.FONT, 15, QFont.Bold))
+        title_label.setStyleSheet(f"color: {theme.TEXT};")
+
+        subtitle = QLabel("Products included in this sale, grouped by product")
+        subtitle.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
+
+        title_box.addWidget(title_label)
+        title_box.addWidget(subtitle)
+        header_layout.addLayout(title_box)
+        header_layout.addStretch()
+        content_layout.addWidget(header)
+
+        # ==================== SUMMARY ====================
+        summary_layout = QHBoxLayout()
+        summary_layout.setSpacing(14)
+
+        self.kpi_products = theme.StatCard("Products", "0", theme.PRIMARY, "")
+        self.kpi_quantity = theme.StatCard("Total Quantity", "0", theme.PURPLE, "")
+        self.kpi_dozen = theme.StatCard("Total Dozen", "0", theme.SLATE, "")
+        self.kpi_total = theme.StatCard("Total Value", "$0.00", theme.SUCCESS, "")
+
+        for card in (self.kpi_products, self.kpi_quantity, self.kpi_dozen, self.kpi_total):
+            summary_layout.addWidget(card, 1)
+
+        content_layout.addLayout(summary_layout)
+
+        # ==================== ITEMS CARD ====================
+        table_card = theme.card_frame()
+        table_layout = QVBoxLayout(table_card)
+        table_layout.setContentsMargins(0, 0, 0, 6)
+        table_layout.setSpacing(0)
+
+        card_header, self.count_label = theme.card_section_header("Items", "")
 
         self.table = QTableWidget()
-        headers = ["Product", "Quantity", "Dozen", "Unit Price", "Total", "Despatched"]
+        headers = ["PRODUCT", "QUANTITY", "DOZEN", "UNIT PRICE", "TOTAL", "DESPATCHED"]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
-        header = self.table.horizontalHeader()
-        # header.setSectionResizeMode(0, QHeaderView.Stretch)
-
+        header_view = theme.style_table(self.table)
+        header_view.setSectionResizeMode(0, QHeaderView.Stretch)
         for i in range(1, 6):
-            header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+            header_view.setSectionResizeMode(i, QHeaderView.ResizeToContents)
 
-        # === ELDERLY‑FRIENDLY: large bold font, tall rows ===
-        self.table.setColumnWidth(0, 250)
-        self.table.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        self.table.verticalHeader().setDefaultSectionSize(55)
+        theme.align_header(self.table, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        theme.align_header(self.table, 3, Qt.AlignRight | Qt.AlignVCenter)
+        theme.align_header(self.table, 4, Qt.AlignRight | Qt.AlignVCenter)
 
-        self.table.setStyleSheet("""
-            QTableWidget {
-                font-size: 15px;
-                font-weight: bold;
-                background-color: white;
-                alternate-background-color: #f8f9fa;
-                gridline-color: #dee2e6;
-                border: 1px solid #dee2e6;
-                border-radius: 4px;
-            }
-            QHeaderView::section {
-                background-color: #2c3e50;
-                color: white;
-                padding: 12px;
-                font-weight: bold;
-                font-size: 15px;
-                border: none;
-            }
-            QTableWidget::item {
-                padding: 10px;
-            }
-        """)
-        self.table.setAlternatingRowColors(True)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table_layout.addWidget(card_header)
+        table_layout.addWidget(self.table)
+        content_layout.addWidget(table_card, 1)
 
         self.populate_table()
-        layout.addWidget(self.table)
 
-        # --- Close button (larger, bold) ---
+        # ==================== FOOTER ====================
+        footer_layout = QHBoxLayout()
+        footer_layout.addStretch()
+
         btn_close = QPushButton("Close")
-        btn_close.setFixedSize(120, 45)   # bigger
-        btn_close.setCursor(Qt.PointingHandCursor)
-        btn_close.setStyleSheet("""
-            QPushButton {
-                background-color: #e0e0e0;
-                color: #2c3e50;
-                border: none;
-                border-radius: 6px;
-                font-weight: bold;
-                font-size: 14px;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background-color: #d5d5d5;
-            }
-        """)
+        theme.style_outline(btn_close, theme.SLATE)
         btn_close.clicked.connect(self.accept)
+        footer_layout.addWidget(btn_close)
 
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        button_layout.addWidget(btn_close)
-        layout.addLayout(button_layout)
+        content_layout.addLayout(footer_layout)
+
+        main_layout.addWidget(content_widget, 1)
 
     def populate_table(self):
         items = []
@@ -1466,56 +1483,59 @@ class SaleItemsDialog(QDialog):
 
         self.table.setRowCount(len(aggregated_list))
         total_sum = 0.0
+        total_quantity = 0
+        total_dozen = 0
 
         for row, item in enumerate(aggregated_list):
             # Product name
             name_item = QTableWidgetItem(item['product_name'])
-            name_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            name_item.setToolTip(item['product_name'])
             self.table.setItem(row, 0, name_item)
 
             # Quantity
-            qty_item = QTableWidgetItem(str(item['quantity']))
-            qty_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            qty_item = QTableWidgetItem(theme.format_number(item['quantity']))
             qty_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 1, qty_item)
 
             # Dozen
             dozen_item = QTableWidgetItem(str(item['dozen']))
-            dozen_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             dozen_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 2, dozen_item)
 
             # Unit Price
             price_item = QTableWidgetItem(f"${item['unit_price']:,.2f}")
-            price_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             price_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.table.setItem(row, 3, price_item)
 
             # Total
             total_item = QTableWidgetItem(f"${item['total']:,.2f}")
-            total_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             total_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.table.setItem(row, 4, total_item)
 
             # Despatched status
-            status = "Yes" if item['for_despatch'] else "No"
-            status_item = QTableWidgetItem(status)
-            status_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
-            status_item.setTextAlignment(Qt.AlignCenter)
-            if item['for_despatch']:
-                status_item.setForeground(QColor("#27ae60"))
-            else:
-                status_item.setForeground(QColor("#e74c3c"))
-            self.table.setItem(row, 5, status_item)
+            self.table.setCellWidget(
+                row, 5, theme.pill_label(
+                    "Yes" if item['for_despatch'] else "No",
+                    theme.STOCK_OK[0] if item['for_despatch'] else theme.STOCK_OUT[0],
+                    theme.STOCK_OK[1] if item['for_despatch'] else theme.STOCK_OUT[1],
+                    min_width=58,
+                    tooltip="Marked for despatch" if item['for_despatch'] else "Not for despatch",
+                )
+            )
 
             total_sum += item['total']
+            total_quantity += item['quantity'] or 0
+            try:
+                total_dozen += int(item['dozen'] or 0)
+            except (TypeError, ValueError):
+                pass
 
         # Add total row
         total_row = len(aggregated_list)
         self.table.insertRow(total_row)
 
         total_label = QTableWidgetItem("TOTAL")
-        total_label.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        total_label.setFont(QFont(theme.FONT, 12, QFont.Bold))
         total_label.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.table.setItem(total_row, 0, total_label)
 
@@ -1523,16 +1543,25 @@ class SaleItemsDialog(QDialog):
         self.table.setSpan(total_row, 0, 1, 4)
 
         total_amount_item = QTableWidgetItem(f"${total_sum:,.2f}")
-        total_amount_item.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        total_amount_item.setFont(QFont(theme.FONT, 12, QFont.Bold))
         total_amount_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.table.setItem(total_row, 4, total_amount_item)
 
         # Empty cell for despatched column in total row
-        total_despatch = QTableWidgetItem("")
-        self.table.setItem(total_row, 5, total_despatch)
+        self.table.setItem(total_row, 5, QTableWidgetItem(""))
 
-        # Resize rows to fit content
-        self.table.resizeRowsToContents()
+        # Summary cards
+        self.kpi_products.set_value(theme.format_number(len(aggregated_list)))
+        self.kpi_quantity.set_value(theme.format_number(total_quantity))
+        self.kpi_dozen.set_value(theme.format_number(total_dozen))
+        self.kpi_total.set_value(f"${total_sum:,.2f}")
+
+        self.count_label.setText(
+            "{} product{}".format(
+                theme.format_number(len(aggregated_list)),
+                "" if len(aggregated_list) == 1 else "s",
+            )
+        )
 
 class DespatchSalesDialog(QDialog):
     def __init__(self, parent, title, sales, current_user, is_despatched):
@@ -2665,91 +2694,93 @@ class SalePaymentHistoryDialog(QDialog):
         self.load_data()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(15)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # Search bar - enlarged
-        search_layout = QHBoxLayout()
-        search_label = QLabel("Search:")
-        search_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        content_widget = QWidget()
+        content_widget.setStyleSheet(f"background-color: {theme.CANVAS};")
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(24, 24, 24, 24)
+        content_layout.setSpacing(14)
+
+        # ==================== HEADER ====================
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(12)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+
+        title_label = QLabel("Payment History")
+        title_label.setFont(QFont(theme.FONT, 15, QFont.Bold))
+        title_label.setStyleSheet(f"color: {theme.TEXT};")
+
+        subtitle = QLabel(f"Payments recorded against sale #{self.sale_id}")
+        subtitle.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
+
+        title_box.addWidget(title_label)
+        title_box.addWidget(subtitle)
+        header_layout.addLayout(title_box)
+        header_layout.addStretch()
+        content_layout.addWidget(header)
+
+        # ==================== FILTER BAR ====================
+        toolbar = theme.card_frame()
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(16, 12, 16, 12)
+        toolbar_layout.setSpacing(10)
+
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Filter by amount, bank...")
-        self.search_edit.setMinimumHeight(35)
-        self.search_edit.setStyleSheet("font-size: 14px; padding: 5px;")
+        self.search_edit.setClearButtonEnabled(True)
+        theme.style_input(self.search_edit)
         self.search_edit.textChanged.connect(self.filter_table)
-        search_layout.addWidget(search_label)
-        search_layout.addWidget(self.search_edit)
-        search_layout.addStretch()
-        layout.addLayout(search_layout)
+        toolbar_layout.addWidget(self.search_edit, 1)
 
-        # Table - elderly-friendly styling
+        content_layout.addWidget(toolbar)
+
+        # ==================== PAYMENTS CARD ====================
+        table_card = theme.card_frame()
+        table_layout = QVBoxLayout(table_card)
+        table_layout.setContentsMargins(0, 0, 0, 6)
+        table_layout.setSpacing(0)
+
+        card_header, self.status_label = theme.card_section_header("Payments", "")
+
         self.table = QTableWidget()
-        headers = ["Date", "Amount", "Bank Account", "Actions"]
+        headers = ["DATE", "AMOUNT", "BANK ACCOUNT", "ACTIONS"]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.Fixed)
-        self.table.setColumnWidth(2, 250)
-        self.table.setColumnWidth(3, 80)  # wider for larger delete button
+        header_view = theme.style_table(self.table)
+        header_view.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header_view.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header_view.setSectionResizeMode(2, QHeaderView.Stretch)
+        header_view.setSectionResizeMode(3, QHeaderView.Fixed)
+        self.table.setColumnWidth(3, 74)  # fits the 62px Delete button plus cell padding
 
-        self.table.setAlternatingRowColors(True)
-        
-        # Large fonts and tall rows
-        self.table.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        self.table.verticalHeader().setDefaultSectionSize(55)
+        theme.align_header(self.table, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        theme.align_header(self.table, 1, Qt.AlignRight | Qt.AlignVCenter)
+        theme.align_header(self.table, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
-        self.table.setStyleSheet("""
-            QTableWidget {
-                font-size: 15px;
-                font-weight: bold;
-                background-color: white;
-                alternate-background-color: #f8f9fa;
-                gridline-color: #dee2e6;
-                border: 1px solid #dee2e6;
-                border-radius: 6px;
-            }
-            QHeaderView::section {
-                background-color: #2c3e50;
-                color: white;
-                padding: 12px;
-                font-weight: bold;
-                font-size: 15px;
-                border: none;
-            }
-            QTableWidget::item {
-                padding: 10px;
-            }
-        """)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table_layout.addWidget(card_header)
+        table_layout.addWidget(self.table)
+        content_layout.addWidget(table_card, 1)
 
-        layout.addWidget(self.table, 1)
+        # ==================== FOOTER ====================
+        footer_layout = QHBoxLayout()
+        footer_layout.addStretch()
 
-        # Close button - larger
         btn_close = QPushButton("Close")
-        btn_close.setFixedSize(120, 45)
-        btn_close.setCursor(Qt.PointingHandCursor)
-        btn_close.setStyleSheet("""
-            QPushButton {
-                background-color: #e0e0e0;
-                color: #2c3e50;
-                border: none;
-                border-radius: 6px;
-                font-weight: bold;
-                font-size: 14px;
-            }
-            QPushButton:hover { background-color: #d5d5d5; }
-        """)
+        theme.style_outline(btn_close, theme.SLATE)
         btn_close.clicked.connect(self.accept)
-        layout.addWidget(btn_close, alignment=Qt.AlignRight)
+        footer_layout.addWidget(btn_close)
 
-        # Status label - larger font
-        self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #7f8c8d; font-size: 13px;")
-        layout.addWidget(self.status_label)
+        content_layout.addLayout(footer_layout)
+
+        main_layout.addWidget(content_widget, 1)
 
     def load_data(self):
         from services.new_sale_service import NewSaleService
@@ -2760,13 +2791,10 @@ class SalePaymentHistoryDialog(QDialog):
         for row, pmt in enumerate(self.payments):
             # Date
             date_str = pmt['payment_date'].strftime("%Y-%m-%d %H:%M") if pmt['payment_date'] else ""
-            date_item = QTableWidgetItem(date_str)
-            date_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
-            self.table.setItem(row, 0, date_item)
+            self.table.setItem(row, 0, QTableWidgetItem(date_str))
 
             # Amount
             amount_item = QTableWidgetItem(f"${pmt['amount']:,.2f}")
-            amount_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
             amount_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.table.setItem(row, 1, amount_item)
 
@@ -2775,27 +2803,16 @@ class SalePaymentHistoryDialog(QDialog):
             if pmt['bank_name']:
                 bank_display = f"{pmt['bank_name']} - {bank_display}"
             bank_item = QTableWidgetItem(bank_display)
-            bank_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            bank_item.setToolTip(bank_display)
             self.table.setItem(row, 2, bank_item)
 
-            # Delete button (admin only) - larger
+            # Delete button (admin only)
             if self.is_user_admin():
-                delete_btn = QPushButton("🗑️")
-                delete_btn.setFixedSize(40, 40)
-                delete_btn.setToolTip("Delete this payment")
-                delete_btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #e74c3c;
-                        color: white;
-                        border: none;
-                        border-radius: 6px;
-                        font-size: 18px;
-                        font-weight: bold;
-                    }
-                    QPushButton:hover { background-color: #c0392b; }
-                """)
-                delete_btn.clicked.connect(lambda checked, t_id=pmt['transaction_id']: self.delete_payment(t_id))
-                self.table.setCellWidget(row, 3, delete_btn)
+                delete_btn = theme.action_button("Delete", "Delete this payment", theme.DANGER, 62)
+                delete_btn.clicked.connect(
+                    lambda checked=False, t_id=pmt['transaction_id']: self.delete_payment(t_id)
+                )
+                self.table.setCellWidget(row, 3, theme.action_cell([delete_btn]))
             else:
                 self.table.setItem(row, 3, QTableWidgetItem(""))
 
@@ -2913,69 +2930,89 @@ class AllSalesOverviewDialog(QDialog):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Content
         content_widget = QWidget()
-        content_widget.setStyleSheet("background-color: #f8f9fa;")
+        content_widget.setStyleSheet(f"background-color: {theme.CANVAS};")
         content_layout = QVBoxLayout(content_widget)
-        content_layout.setContentsMargins(30, 30, 30, 30)
-        content_layout.setSpacing(15)
+        content_layout.setContentsMargins(24, 24, 24, 24)
+        content_layout.setSpacing(14)
 
-        # Search bar - enlarged
-        search_layout = QHBoxLayout()
-        search_label = QLabel("Search:")
-        search_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        # ==================== HEADER ====================
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(12)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+
+        title_label = QLabel("All Sales Overview")
+        title_label.setFont(QFont(theme.FONT, 15, QFont.Bold))
+        title_label.setStyleSheet(f"color: {theme.TEXT};")
+
+        subtitle = QLabel("Search, filter and review every recorded sale")
+        subtitle.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
+
+        title_box.addWidget(title_label)
+        title_box.addWidget(subtitle)
+        header_layout.addLayout(title_box)
+        header_layout.addStretch()
+        content_layout.addWidget(header)
+
+        # ==================== FILTER BAR ====================
+        field_qss = theme.INPUT_QSS
+
+        toolbar = theme.card_frame()
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(16, 12, 16, 12)
+        toolbar_layout.setSpacing(10)
+
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Type to filter by sale ID, customer, or product...")
-        self.search_edit.setMinimumHeight(35)
-        self.search_edit.setStyleSheet("font-size: 14px; padding: 5px;")
+        self.search_edit.setPlaceholderText("Search by sale ID, customer or product...")
+        self.search_edit.setMinimumHeight(38)
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setStyleSheet(field_qss)
         self.search_edit.textChanged.connect(self.on_search_changed)
-        search_layout.addWidget(search_label)
-        search_layout.addWidget(self.search_edit)
+        toolbar_layout.addWidget(self.search_edit, 1)
 
-        date_label = QLabel("Date:")
-        date_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        search_layout.addWidget(date_label)
+        date_label = QLabel("Date")
+        date_label.setStyleSheet(
+            f"color: {theme.MUTED}; font-size: 12px; font-weight: 600;"
+        )
+        toolbar_layout.addWidget(date_label)
 
         self.date_search_edit = QLineEdit()
         self.date_search_edit.setPlaceholderText("DD/MM/YYYY (Ethiopian)")
-        self.date_search_edit.setMinimumHeight(35)
-        self.date_search_edit.setMaximumWidth(150)
-        self.date_search_edit.setStyleSheet("font-size: 14px; padding: 5px;")
+        self.date_search_edit.setMinimumHeight(38)
+        self.date_search_edit.setFixedWidth(190)
+        self.date_search_edit.setStyleSheet(field_qss)
         self.date_search_edit.textChanged.connect(self.on_date_search_changed)
-        search_layout.addWidget(self.date_search_edit)
+        toolbar_layout.addWidget(self.date_search_edit)
 
         clear_date_btn = QPushButton("Clear Date")
-        clear_date_btn.setFixedHeight(35)
         clear_date_btn.setCursor(Qt.PointingHandCursor)
-        clear_date_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #95a5a6;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-weight: bold;
-                padding: 0 10px;
-            }
-            QPushButton:hover {
-                background-color: #7f8c8d;
-            }
-        """)
+        theme.style_outline(clear_date_btn, theme.SLATE)
         clear_date_btn.clicked.connect(self.clear_date_search)
-        search_layout.addWidget(clear_date_btn)
+        toolbar_layout.addWidget(clear_date_btn)
 
-        search_layout.addStretch()
-        content_layout.addLayout(search_layout)
+        content_layout.addWidget(toolbar)
 
-        # Table - elderly-friendly styling
+        # ==================== TABLE CARD ====================
+        table_card = theme.card_frame()
+        table_layout = QVBoxLayout(table_card)
+        table_layout.setContentsMargins(0, 0, 0, 6)
+        table_layout.setSpacing(0)
+
+        table_header, self.count_label = theme.card_section_header("Sales", "—")
+
         self.table = QTableWidget()
         headers = [
-            "Sale ID", "Date (Ethiopian)", "Customer", "Delivery Address", "Total Amount",
-            "Payment Status", "Actions"
+            "SALE ID", "DATE (ETHIOPIAN)", "CUSTOMER", "DELIVERY ADDRESS",
+            "TOTAL AMOUNT", "PAYMENT STATUS", "ACTIONS"
         ]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
-        header = self.table.horizontalHeader()
+        header = theme.style_table(self.table)
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
@@ -2983,61 +3020,35 @@ class AllSalesOverviewDialog(QDialog):
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.Fixed)
-        self.table.setColumnWidth(6, 160)  # wider for larger buttons
+        self.table.setColumnWidth(6, 240)
 
-        self.table.setAlternatingRowColors(True)
-        
-        # Large fonts and tall rows
-        self.table.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        self.table.verticalHeader().setDefaultSectionSize(55)
-
-        self.table.setStyleSheet("""
-            QTableWidget {
-                font-size: 15px;
-                font-weight: bold;
-                background-color: white;
-                alternate-background-color: #f8f9fa;
-                gridline-color: #dee2e6;
-                border: 1px solid #dee2e6;
-                border-radius: 6px;
-            }
-            QHeaderView::section {
-                background-color: #2c3e50;
-                color: white;
-                padding: 12px;
-                font-weight: bold;
-                font-size: 15px;
-                border: none;
-            }
-            QTableWidget::item {
-                padding: 10px;
-            }
-        """)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        theme.align_header(self.table, 2, Qt.AlignLeft | Qt.AlignVCenter)
+        theme.align_header(self.table, 3, Qt.AlignLeft | Qt.AlignVCenter)
+        theme.align_header(self.table, 4, Qt.AlignRight | Qt.AlignVCenter)
 
         # Connect scroll bar for lazy loading
         self.table.verticalScrollBar().valueChanged.connect(self.on_scroll)
 
-        content_layout.addWidget(self.table, 1)
+        table_layout.addWidget(table_header)
+        table_layout.addWidget(self.table)
+        content_layout.addWidget(table_card, 1)
 
         self.fuzzy_status_label = QLabel("")
         self.fuzzy_status_label.setAlignment(Qt.AlignCenter)
-        self.fuzzy_status_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
-        self.fuzzy_status_label.setStyleSheet("color: #f39c12;")
+        self.fuzzy_status_label.setFont(QFont(theme.FONT, 11, QFont.DemiBold))
+        self.fuzzy_status_label.setStyleSheet(f"color: {theme.WARNING_DARK};")
         self.fuzzy_status_label.hide()
         content_layout.addWidget(self.fuzzy_status_label)
 
         # Loading indicator
         self.loading_label = QLabel("Loading sales data, please wait...")
         self.loading_label.setAlignment(Qt.AlignCenter)
-        self.loading_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        self.loading_label.setFont(QFont(theme.FONT, 11, QFont.DemiBold))
+        self.loading_label.setStyleSheet(f"color: {theme.MUTED};")
         self.loading_label.hide()
         content_layout.addWidget(self.loading_label)
 
-
         main_layout.addWidget(content_widget, 1)
-
     def on_search_changed(self, text):
         """Debounced search – triggers after 300ms of no typing."""
         self.current_search = text
@@ -3141,6 +3152,9 @@ class AllSalesOverviewDialog(QDialog):
             self.loading_label.show()
             self.table.hide()
 
+            if hasattr(self, "count_label"):
+                self.count_label.setText("Loading...")
+
             self._load_version = self.search_version
 
         if reset:
@@ -3243,24 +3257,32 @@ class AllSalesOverviewDialog(QDialog):
     def append_rows(self, sales):
         start_row = self.table.rowCount()
         self.table.setRowCount(start_row + len(sales))
+
+        group_font = QFont(theme.FONT, 10, QFont.DemiBold)
+
         for offset, sale in enumerate(sales):
             row = start_row + offset
-            
+
             # Sale ID
             id_item = QTableWidgetItem(str(sale.id))
-            id_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            id_item.setFont(group_font)
+            id_item.setTextAlignment(Qt.AlignCenter)
+            id_item.setForeground(QColor(theme.MUTED))
             self.table.setItem(row, 0, id_item)
 
             # Ethiopian date
-            date_str = self._to_ethiopian_date_str(sale.created_at)
-            date_item = QTableWidgetItem(date_str)
-            date_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            date_item = QTableWidgetItem(self._to_ethiopian_date_str(sale.created_at))
+            date_item.setFont(group_font)
+            date_item.setTextAlignment(Qt.AlignCenter)
+            date_item.setForeground(QColor(theme.TEXT))
             self.table.setItem(row, 1, date_item)
 
             # Customer
             customer = sale.customer.name if sale.customer else "N/A"
             cust_item = QTableWidgetItem(customer)
-            cust_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            cust_item.setFont(group_font)
+            cust_item.setForeground(QColor(theme.TEXT))
+            cust_item.setToolTip(customer)
             self.table.setItem(row, 2, cust_item)
 
             # Delivery Address - elide with tooltip
@@ -3275,31 +3297,36 @@ class AllSalesOverviewDialog(QDialog):
                 parts.append(sale.delivery_Plate)
             delivery_str = ' - '.join(parts) if parts else ''
             delivery_item = QTableWidgetItem(delivery_str)
-            delivery_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            delivery_item.setForeground(QColor(theme.MUTED))
             delivery_item.setToolTip(delivery_str if delivery_str else "No delivery address")
             self.table.setItem(row, 3, delivery_item)
 
             # Total Amount
             amount_item = QTableWidgetItem(f"${sale.total_amount:,.2f}")
-            amount_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            amount_item.setFont(group_font)
             amount_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            amount_item.setForeground(QColor(theme.TEXT))
             self.table.setItem(row, 4, amount_item)
 
             # Payment Status
             status = self._get_payment_status(sale)
             status_item = QTableWidgetItem(status)
-            status_item.setFont(QFont("Segoe UI", 13, QFont.Bold))
+            status_item.setFont(group_font)
             status_item.setTextAlignment(Qt.AlignCenter)
             if status == "Paid":
-                status_item.setForeground(QColor("#27ae60"))
+                status_item.setForeground(QColor(theme.SUCCESS))
             elif status in ["Credit", "Partial"]:
-                status_item.setForeground(QColor("#e74c3c"))
+                status_item.setForeground(QColor(theme.DANGER))
+            else:
+                status_item.setForeground(QColor(theme.MUTED))
             self.table.setItem(row, 5, status_item)
 
-            # Actions - larger buttons
+            # Actions
             actions_widget = self.create_action_buttons(sale)
             self.table.setCellWidget(row, 6, actions_widget)
 
+        if hasattr(self, "count_label"):
+            self.count_label.setText(f"{self.table.rowCount():,} sales")
     def _to_ethiopian_date_str(self, dt):
         if not dt:
             return ""
@@ -3323,98 +3350,33 @@ class AllSalesOverviewDialog(QDialog):
             return term.payment_status.value.capitalize() if term.payment_status else "Unknown"
 
     def create_action_buttons(self, sale):
-        widget = QWidget()
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(5, 0, 5, 0)
-        layout.setSpacing(5)
+        buttons = []
 
         # View items button
-        view_btn = QPushButton("👁️")
-        view_btn.setFixedSize(40, 40)
-        view_btn.setToolTip("View Items")
-        view_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-size: 18px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #2980b9; }
-        """)
+        view_btn = theme.action_button("View", "View items", theme.PRIMARY, 50)
         view_btn.clicked.connect(lambda: self.view_sale_items(sale.id))
-
-        if not sale.items_data:
-            edit_btn = QPushButton("✏️")
-            edit_btn.setFixedSize(40, 40)
-            edit_btn.setToolTip("Edit this sale")
-            edit_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #27ae60;
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    font-size: 18px;
-                    font-weight: bold;
-                }
-                QPushButton:hover { background-color: #1e8449; }
-            """)
-            edit_btn.clicked.connect(lambda: self.edit_sale_requested.emit(sale.id))
+        buttons.append(view_btn)
 
         # Payment history button
-        hist_btn = QPushButton("📜")
-        hist_btn.setFixedSize(40, 40)
-        hist_btn.setToolTip("Payment History")
-        hist_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f39c12;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-size: 18px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #e67e22; }
-        """)
+        hist_btn = theme.action_button("History", "Payment History", theme.PURPLE, 62)
         hist_btn.clicked.connect(lambda: self.show_payment_history(sale.id))
+        buttons.append(hist_btn)
+
+        if not sale.items_data:
+            edit_btn = theme.action_button("Edit", "Edit this sale", theme.WARNING, 46)
+            edit_btn.clicked.connect(lambda: self.edit_sale_requested.emit(sale.id))
+            buttons.append(edit_btn)
 
         # Delete button
-        delete_btn = QPushButton("🗑️")
-        delete_btn.setFixedSize(40, 40)
-        delete_btn.setToolTip("Delete Sale")
+        delete_btn = theme.action_button("Delete", "Delete Sale", theme.DANGER, 56)
         if self.is_user_admin():
-            delete_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #e74c3c;
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    font-size: 18px;
-                    font-weight: bold;
-                }
-                QPushButton:hover { background-color: #c0392b; }
-            """)
             delete_btn.clicked.connect(lambda: self.delete_sale(sale.id))
         else:
             delete_btn.setEnabled(False)
-            delete_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #bdc3c7;
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    font-size: 18px;
-                }
-            """)
+            delete_btn.setToolTip("Delete Sale - admin access required")
+        buttons.append(delete_btn)
 
-        layout.addWidget(view_btn)
-        layout.addWidget(hist_btn)
-        if not sale.items_data:
-            layout.addWidget(edit_btn) # type: ignore
-        layout.addWidget(delete_btn)
-        return widget
-
+        return theme.action_cell(buttons)
     def view_sale_items(self, sale_id):
         from services.new_sale_service import NewSaleService
         service = NewSaleService()

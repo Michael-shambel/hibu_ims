@@ -2,15 +2,16 @@
 import logging
 from functools import partial
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QFrame,
     QLineEdit,
     QTextEdit, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
-    QCheckBox,
+    QCheckBox, QSizePolicy,
 )
 from PySide6.QtCore import Qt,QTimer
 from PySide6.QtGui import QFont, QColor
+from ui.components import theme
 from services.new_product_service import NewProductService
 from services.supplier_service import SupplierService
 from ui.pages.product_dialog import ProductFormDialog
@@ -63,193 +64,143 @@ class ProductManager(QWidget):
         self.load_products(initial_load=True)
     
     def init_ui(self):
-        """Initialize the modern UI cost_value"""
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-        
+        """Build a clean, professional product management interface."""
+        self.stat_cards = {}
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(14)
+
+        # ==================== KPI CARDS ====================
+        stats_row = QHBoxLayout()
+        stats_row.setContentsMargins(0, 0, 0, 0)
+        stats_row.setSpacing(14)
+
+        for key, title, value, color, icon in (
+            ("products", "Products Listed", "0", theme.PRIMARY, "📦"),
+            ("cost", "Cost Value", "$0.00", theme.SUCCESS, "💰"),
+            ("low", "Low Stock", "0", theme.WARNING, "⚠️"),
+            ("out", "Out of Stock", "0", theme.DANGER, "🚫"),
+        ):
+            card = theme.StatCard(title, value, color, icon)
+            self.stat_cards[key] = card
+            stats_row.addWidget(card)
+
+        root.addLayout(stats_row)
+
         # ==================== TOOLBAR ====================
-        toolbar = QWidget()
+        toolbar = theme.card_frame()
         toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(15, 10, 15, 10)
-        toolbar_layout.setSpacing(15)
-        
-        # Left side: Add Product button
-        self.add_btn = QPushButton("➕ Add Product")
-        # self.add_btn.setIcon(QIcon.fromTheme("list-add"))
-        self.add_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 8px 15px;
-                font-weight: 600;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-            QPushButton:pressed {
-                background-color: #21618c;
-            }
-        """)
+        toolbar_layout.setContentsMargins(16, 12, 16, 12)
+        toolbar_layout.setSpacing(10)
 
-        # Add Batch Button (enabled only when product selected)
-        self.add_batch_btn = QPushButton("📦 Add Batch")
-        self.add_batch_btn.setMinimumSize(120, 40)
-        self.add_batch_btn.setEnabled(False)
-        self.add_batch_btn.clicked.connect(self.open_add_batch_dialog)
-        self.add_batch_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-weight: bold;
-            }
-            QPushButton:disabled {
-                background-color: #bdc3c7;
-                color: #7f8c8d;
-            }
-            QPushButton:hover:enabled {
-                background-color: #2980b9;
-            }
-        """)
-        self.add_batch_btn.setVisible(False)
-
-        self.stock_in_btn = QPushButton("📦 Stock In")
-        self.stock_in_btn.setMinimumSize(120, 40)
-        self.stock_in_btn.setEnabled(True)
-        # print(f"DEBUG: stock_in_btn enabled at creation = {self.stock_in_btn.isEnabled()}, user = {self.current_user}")
-        self.stock_in_btn.clicked.connect(self.open_stock_in_dialog)
-        self.stock_in_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #27ae60;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-weight: bold;
-            }
-            QPushButton:disabled {
-                background-color: #bdc3c7;
-                color: #7f8c8d;
-            }
-            QPushButton:hover:enabled {
-                background-color: #219a52;
-            }
-        """)
-        self.stock_in_btn.setVisible(True)
-        self.credit_purchase_btn = QPushButton("📝 Credit Stock")
-        self.credit_purchase_btn.setMinimumSize(120, 40)
-        self.credit_purchase_btn.setEnabled(True)
-        self.credit_purchase_btn.clicked.connect(self.open_credit_purchase_dialog)
-        self.credit_purchase_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #8e44ad;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #9b59b6;
-            }
-            QPushButton:disabled {
-                background-color: #bdc3c7;
-                color: #7f8c8d;
-            }
-        """)
-        self.credit_purchase_btn.setVisible(True)
-
-        # Add to toolbar layout (after add_batch_btn)
-        toolbar_layout.addWidget(self.stock_in_btn)
-        toolbar_layout.addWidget(self.credit_purchase_btn)
-
+        self.add_btn = QPushButton("➕  Add Product")
         self.add_btn.clicked.connect(self.show_add_product_dialog)
-        
-        toolbar_layout.addWidget(self.add_btn)
-        toolbar_layout.addWidget(self.add_batch_btn)
-        # toolbar_layout.addWidget(self.view_batches_btn)
+        theme.style_filled(self.add_btn, theme.PRIMARY, theme.PRIMARY_DARK)
+
+        self.stock_in_btn = QPushButton("📥  Stock In")
+        self.stock_in_btn.clicked.connect(self.open_stock_in_dialog)
+        theme.style_filled(self.stock_in_btn, theme.SUCCESS, theme.SUCCESS_DARK)
+
+        self.credit_purchase_btn = QPushButton("🧾  Credit Stock")
+        self.credit_purchase_btn.clicked.connect(self.open_credit_purchase_dialog)
+        theme.style_filled(self.credit_purchase_btn, theme.PURPLE, theme.PURPLE_DARK)
+
+        self.add_batch_btn = QPushButton("📦  Add Batch")
+        self.add_batch_btn.setEnabled(False)
+        self.add_batch_btn.setToolTip("Select a single product to add a new batch")
+        self.add_batch_btn.clicked.connect(self.open_add_batch_dialog)
+        theme.style_filled(self.add_batch_btn, theme.SLATE, theme.SLATE_DARK)
+
+        for button in (self.add_btn, self.stock_in_btn,
+                       self.credit_purchase_btn, self.add_batch_btn):
+            toolbar_layout.addWidget(button)
         toolbar_layout.addStretch()
-        
-        # Right side: Search field
-        search_container = QWidget()
-        search_layout = QHBoxLayout(search_container)
-        search_layout.setContentsMargins(0, 0, 0, 0)
-        search_layout.setSpacing(5)
-        
-        search_icon = QLabel("🔍")
-        search_icon.setStyleSheet("color: #7f8c8d; font-size: 16px; padding-right: 5px;")
-        
-        self.search_field = QLineEdit()
-        self.search_field.setPlaceholderText("Search products by name, description, or batch...")
-        self.search_field.setMinimumWidth(300)
-        self.search_field.setClearButtonEnabled(True)
-        self.search_field.setStyleSheet("""
-            QLineEdit {
-                border: 2px solid #e0e0e0;
+
+        search_container = QFrame()
+        search_container.setObjectName("searchBox")
+        search_container.setFixedHeight(38)
+        search_container.setStyleSheet(f"""
+            QFrame#searchBox {{
+                background-color: {theme.CANVAS};
+                border: 1px solid {theme.BORDER};
                 border-radius: 8px;
-                padding: 8px 12px;
-                font-size: 13px;
-                background-color: white;
-            }
-            QLineEdit:focus {
-                border: 2px solid #3498db;
-            }
+            }}
         """)
-        
+        search_layout = QHBoxLayout(search_container)
+        search_layout.setContentsMargins(12, 0, 8, 0)
+        search_layout.setSpacing(8)
+
+        search_icon = QLabel("🔍")
+        search_icon.setStyleSheet(
+            f"color: {theme.MUTED}; font-size: 14px; background: transparent;"
+        )
+
+        self.search_field = QLineEdit()
+        self.search_field.setPlaceholderText("Search products by name or unit...")
+        self.search_field.setMinimumWidth(280)
+        self.search_field.setClearButtonEnabled(True)
+        self.search_field.setFrame(False)
+        self.search_field.setStyleSheet(f"""
+            QLineEdit {{
+                border: none;
+                background: transparent;
+                font-size: 13px;
+                color: {theme.TEXT};
+                padding: 8px 0;
+            }}
+        """)
         self.search_field.textChanged.connect(self.on_search_text_changed)
-        
+
         search_layout.addWidget(search_icon)
         search_layout.addWidget(self.search_field)
-        
         toolbar_layout.addWidget(search_container)
-        
-        main_layout.addWidget(toolbar)
-        
-        # ==================== TABLE AREA ====================
-        table_container = QWidget()
-        table_layout = QVBoxLayout(table_container)
-        table_layout.setContentsMargins(15, 0, 15, 15)
-        table_layout.setSpacing(10)
-        
-        title = QLabel("📦 Product Inventory")
-        title.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        title.setStyleSheet("color: #2c3e50; margin-bottom: 10px;")
-        table_layout.addWidget(title)
-        
+
+        root.addWidget(toolbar)
+
+        # ==================== TABLE CARD ====================
+        table_card = theme.card_frame()
+        table_layout = QVBoxLayout(table_card)
+        table_layout.setContentsMargins(0, 0, 0, 6)
+        table_layout.setSpacing(0)
+
+        table_header, self.count_label = theme.card_section_header("Product Inventory", "0 items")
+
         self.table = self.create_product_table()
+        table_layout.addWidget(table_header)
         table_layout.addWidget(self.table)
-        
+
         self.loading_label = QLabel("Loading products...")
         self.loading_label.setAlignment(Qt.AlignCenter)
-        self.loading_label.setStyleSheet("color: #7f8c8d; font-style: italic; padding: 10px; font-size: 13px;")
+        self.loading_label.setStyleSheet(
+            f"color: {theme.MUTED}; font-style: italic; padding: 10px; font-size: 12px;"
+        )
         self.loading_label.hide()
         table_layout.addWidget(self.loading_label)
-        
-        main_layout.addWidget(table_container, 1)
-        
+
+        root.addWidget(table_card, 1)
+
         # ==================== STATUS BAR ====================
-        status_bar = QWidget()
-        status_bar.setFixedHeight(30)
-        
+        status_bar = theme.card_frame()
+        status_bar.setFixedHeight(34)
         status_layout = QHBoxLayout(status_bar)
-        status_layout.setContentsMargins(0, 0, 0, 0)
-        
+        status_layout.setContentsMargins(14, 0, 14, 0)
+
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("color: #7f8c8d; font-size: 16px;")
-        
+        self.status_label.setStyleSheet(
+            f"color: {theme.MUTED}; font-size: 12px; background: transparent;"
+        )
+
         self.stats_label = QLabel("Total: 0 products")
-        self.stats_label.setStyleSheet("color: #2c3e50; font-size: 16px;")
-        
+        self.stats_label.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 12px; background: transparent;"
+        )
+
         status_layout.addWidget(self.status_label)
         status_layout.addStretch()
         status_layout.addWidget(self.stats_label)
-        
-        main_layout.addWidget(status_bar)
-        # print("DEBUG: init_ui completed")
-    
+
+        root.addWidget(status_bar)
     def open_credit_purchase_dialog(self):
         dialog = ProductFormDialog(
             product_service=self.new_product_service,
@@ -277,70 +228,37 @@ class ProductManager(QWidget):
         dialog.exec()
     
     def create_product_table(self):
-        """Create the products table"""
+        """Create the products table."""
         table = QTableWidget()
         table.setColumnCount(11)
         table.setHorizontalHeaderLabels([
-            "", "Product Name", "Available Stock", "Price", "Unit", "Dozen", "Total Stock", "Batches", "Total Cost", "Actions", "CostValue"
+            "", "PRODUCT", "AVAILABLE STOCK", "PRICE", "UNIT",
+            "DOZEN", "TOTAL STOCK", "BATCHES", "TOTAL COST", "ACTIONS", "COST"
         ])
 
-        font = QFont()
-        font.setPointSize(16)      # Larger font size
-        font.setBold(True)         # Bold text
-        table.setFont(font)
-        
-        table.setStyleSheet("""
-            QTableWidget {
-                font-size: 16px;
-                font-weight: bold;
-            }
-            QTableWidget::item {
-                padding: 10px;
-            }
-            QHeaderView::section {
-                font-size: 16px;
-                font-weight: bold;
-                padding: 8px;
-            }
-        """)
+        header = theme.style_table(table)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
 
-
-        # Configure header
-        header = table.horizontalHeader()
-        table.setColumnWidth(0, 50)
-        table.setColumnWidth(1, 400)
+        table.setColumnWidth(0, 46)
         table.setColumnWidth(2, 150)
-        table.setColumnWidth(3, 150)
-        table.setColumnWidth(4, 65)
+        table.setColumnWidth(3, 130)
+        table.setColumnWidth(4, 80)
         table.setColumnWidth(5, 80)
-        table.setColumnWidth(6, 110)  
-        table.setColumnWidth(7, 70)
-        table.setColumnWidth(8, 100)
-        table.setColumnWidth(9, 150)
-        table.setColumnWidth(10, 10)
+        table.setColumnWidth(6, 120)
+        table.setColumnWidth(9, 212)
+
+        theme.align_header(table, 1, Qt.AlignLeft | Qt.AlignVCenter)
+        theme.align_header(table, 3, Qt.AlignRight | Qt.AlignVCenter)
 
         table.setColumnHidden(7, True)
         table.setColumnHidden(8, True)
         table.setColumnHidden(10, True)
-        
 
-        
-        # header.setSectionResizeMode(1, QHeaderView.Stretch)
-        
-        # Table behavior
-        table.setAlternatingRowColors(True)
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setSelectionMode(QTableWidget.SingleSelection)
-        
-        # Connect scroll for infinite loading
+
         table.verticalScrollBar().valueChanged.connect(self.on_scroll)
-        
+
         return table
-    
-    # ==================== SEARCH METHODS ====================
-    
     def on_search_text_changed(self, text):
         """Handle search text changes with debouncing"""
         self.search_timer.stop()
@@ -479,174 +397,119 @@ class ProductManager(QWidget):
         self.table.setRowHeight(row, 60)
 
     def add_product_row(self, row, product, cost_value=0.0):
-        """Add a product row to the table"""
-        # Checkbox column
+        """Add a styled product row to the table."""
+        product_id = product["id"]
+
+        # ---- Selection checkbox ----
         checkbox_widget = QWidget()
+        checkbox_widget.setObjectName("cellWidget")
+        checkbox_widget.setStyleSheet("#cellWidget { background: transparent; }")
         checkbox_layout = QHBoxLayout(checkbox_widget)
-        checkbox_layout.setContentsMargins(10, 0, 0, 0)
+        checkbox_layout.setContentsMargins(0, 0, 0, 0)
         checkbox_layout.setAlignment(Qt.AlignCenter)
 
         checkbox = QCheckBox()
-        product_id = product["id"]
-        is_checked = product_id in self.selected_product_ids
-        checkbox.setChecked(is_checked)
+        checkbox.setCursor(Qt.PointingHandCursor)
+        checkbox.setChecked(product_id in self.selected_product_ids)
+        checkbox.setStyleSheet("""
+            QCheckBox::indicator {
+                width: 17px;
+                height: 17px;
+                border: 2px solid #cbd5e1;
+                border-radius: 4px;
+                background-color: #ffffff;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #94a3b8;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #3498db;
+                border-color: #3498db;
+            }
+        """)
         self.checkbox_widgets[product_id] = checkbox
-        checkbox.stateChanged.connect(
-            partial(self.on_checkbox_changed, product_id=product_id)
-        )
+        checkbox.stateChanged.connect(partial(self.on_checkbox_changed, product_id=product_id))
         checkbox_layout.addWidget(checkbox)
         self.table.setCellWidget(row, 0, checkbox_widget)
 
-        # Product name label – use larger bold font (24pt)
-        product_name = product["name"]
-        name_label = QLabel(product_name)
-        name_font = QFont("Segoe UI", 12, QFont.Bold)
-        name_label.setFont(name_font)
-        name_label.setWordWrap(True)
-        name_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        name_label.setFrameStyle(QFrame.NoFrame)
-        
-        item_font = QFont("Segoe UI", 12, QFont.Bold)
+        # ---- Product name ----
+        name = product["name"]
+        name_item = QTableWidgetItem(name)
+        name_item.setToolTip(name)
+        name_item.setFont(QFont(theme.FONT, 10, QFont.DemiBold))
+        name_item.setForeground(QColor(theme.TEXT))
+        if self.current_search_term and self.current_search_term.lower() in name.lower():
+            name_item.setForeground(QColor(theme.PRIMARY))
+        self.table.setItem(row, 1, name_item)
 
+        # ---- Available stock badge ----
+        self.table.setCellWidget(row, 2, theme.stock_badge(product["stock"]))
 
-        # Calculate height based on the larger font
-        font_metrics = name_label.fontMetrics()
-        col_width = self.table.columnWidth(1) - 10
-        text_rect = font_metrics.boundingRect(
-            0, 0, col_width, 0,
-            Qt.TextWordWrap | Qt.AlignLeft,
-            product_name
-        )
-        # Original minimum was 45, then doubled → minimum now 90
-        original_height = max(45, text_rect.height() + 15)
-        height = original_height * 2
-        name_label.setFixedHeight(height)
-
-        if self.current_search_term and self.current_search_term.lower() in product_name.lower():
-            name_label.setStyleSheet("font-weight: bold; background-color: #ffff99;")
-        self.table.setCellWidget(row, 1, name_label)
-
-        # Stock Quantity (inherits table font – 24pt bold)
-        stock_item = QTableWidgetItem(str(product["stock"]))
-        stock_item.setTextAlignment(Qt.AlignCenter)
-        stock_item.setFont(item_font)
-        if product["stock"] <= 10:
-            stock_item.setForeground(QColor("#e74c3c"))
-        else:
-            stock_item.setForeground(QColor("#27ae60"))
-        self.table.setItem(row, 2, stock_item)
-
-        # Price
-        price_item = QTableWidgetItem(f"${product['price']:.2f}")
-        price_item.setFont(item_font)
+        # ---- Price ----
+        price_item = QTableWidgetItem(f"${product['price']:,.2f}")
+        price_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        price_item.setFont(QFont(theme.FONT, 10, QFont.DemiBold))
+        price_item.setForeground(QColor(theme.TEXT))
         self.table.setItem(row, 3, price_item)
 
-        # Unit
-        unit_item = QTableWidgetItem(product["unit"] or "")
-        unit_item.setFont(item_font)
+        # ---- Unit ----
+        unit_item = QTableWidgetItem(product["unit"] or "—")
+        unit_item.setTextAlignment(Qt.AlignCenter)
+        unit_item.setForeground(QColor(theme.MUTED))
         self.table.setItem(row, 4, unit_item)
 
-        # Dozen
-        dozen_item = QTableWidgetItem(str(product["dozen"]))
+        # ---- Dozen ----
+        dozen_item = QTableWidgetItem(theme.format_number(product["dozen"]))
         dozen_item.setTextAlignment(Qt.AlignCenter)
-        dozen_item.setFont(item_font)
+        dozen_item.setForeground(QColor(theme.TEXT))
         self.table.setItem(row, 5, dozen_item)
 
-        # Total Quantity
-        total_quantity_item = QTableWidgetItem(str(product["total_quantity"]))
-        total_quantity_item.setTextAlignment(Qt.AlignCenter)
-        total_quantity_item.setFont(item_font)
-        self.table.setItem(row, 6, total_quantity_item)
+        # ---- Total stock ----
+        total_item = QTableWidgetItem(theme.format_number(product["total_quantity"]))
+        total_item.setTextAlignment(Qt.AlignCenter)
+        total_item.setForeground(QColor(theme.TEXT))
+        self.table.setItem(row, 6, total_item)
 
+        # ---- Hidden batches ----
         batch_item = QTableWidgetItem(str(product["total_batches"]))
         batch_item.setTextAlignment(Qt.AlignCenter)
-        batch_item.setFont(item_font)
         self.table.setItem(row, 7, batch_item)
 
-        cost_display_item = QTableWidgetItem(f"${cost_value * product['dozen']:.2f}")
+        # ---- Hidden cost display ----
+        cost_display_item = QTableWidgetItem(f"${cost_value * product['dozen']:,.2f}")
         cost_display_item.setTextAlignment(Qt.AlignCenter)
-        cost_display_item.setFont(item_font)
         self.table.setItem(row, 8, cost_display_item)
 
-        # Action Buttons (unchanged size)
-        actions_widget = self.create_action_buttons(product)
-        self.table.setCellWidget(row, 9, actions_widget)
+        # ---- Action buttons ----
+        self.table.setCellWidget(row, 9, self.create_action_buttons(product))
 
+        # ---- Hidden numeric cost + stock (used by update_stats) ----
         cost_item = QTableWidgetItem()
         cost_item.setText(f"{cost_value:.2f}")
         cost_item.setTextAlignment(Qt.AlignCenter)
         cost_item.setData(Qt.UserRole, float(cost_value))
+        cost_item.setData(Qt.UserRole + 1, int(product["stock"] or 0))
         self.table.setItem(row, 10, cost_item)
 
-        self.table.setRowHeight(row, height)
-    
+        self.table.setRowHeight(row, theme.ROW_HEIGHT)
     def create_action_buttons(self, product):
-        """Create action buttons for a product row"""
-        widget = QWidget()
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(5, 0, 5, 0)
-        layout.setSpacing(3)
-
-        # View Details button
-        view_btn = QPushButton("👁️")
-        view_btn.setFixedSize(45, 45)          # 30 → 45
-        view_btn.setFont(QFont("Segoe UI", 20))
-        view_btn.setToolTip("View Product Details")
+        """Create the compact row action buttons."""
+        view_btn = theme.action_button("View", "View product details", theme.PRIMARY, 56)
         view_btn.clicked.connect(partial(self.view_product_details, product))
-        
-        # Edit button
-        edit_btn = QPushButton("✏️")
-        edit_btn.setFixedSize(45, 45)
-        edit_btn.setFont(QFont("Segoe UI", 20))
-        edit_btn.setToolTip("Edit Product (Admin only)")
-        if not self.is_user_admin():
-            edit_btn.setEnabled(False)
-            edit_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #f8f9fa;
-                    color: #bdc3c7;
-                    border: 1px solid #ecf0f1;
-                    border-radius: 4px;
-                }
-            """)
-            edit_btn.setToolTip("Edit Product - Admin access required")
-        else:
+
+        edit_btn = theme.action_button("Edit", "Edit product", theme.WARNING, 52)
+        delete_btn = theme.action_button("Delete", "Delete product", theme.DANGER, 62)
+
+        if self.is_user_admin():
             edit_btn.clicked.connect(partial(self.edit_product, product))
-                
-        # Delete button
-        delete_btn = QPushButton("🗑️")
-        delete_btn.setFixedSize(45, 45)
-        delete_btn.setEnabled(False)
-        delete_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f8f9fa;
-                color: #bdc3c7;
-                border: 1px solid #ecf0f1;
-                border-radius: 4px;
-                }
-        """)
-        delete_btn.setFont(QFont("Segoe UI", 20))
-        delete_btn.setToolTip("Delete Product (Admin only)")
-        if not self.is_user_admin():
-            delete_btn.setEnabled(False)
-            delete_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #f8f9fa;
-                    color: #bdc3c7;
-                    border: 1px solid #ecf0f1;
-                    border-radius: 4px;
-                }
-            """)
-            delete_btn.setToolTip("Delete Product - Admin access required")
-        else:
             delete_btn.clicked.connect(partial(self.delete_product, product))
-        
-        layout.addWidget(view_btn)
-        layout.addWidget(edit_btn)
-        layout.addWidget(delete_btn)
-        
-        return widget
-    
+        else:
+            edit_btn.setEnabled(False)
+            edit_btn.setToolTip("Edit product — admin access required")
+            delete_btn.setEnabled(False)
+            delete_btn.setToolTip("Delete product — admin access required")
+
+        return theme.action_cell([view_btn, edit_btn, delete_btn])
     def add_loading_row(self):
         """Add a loading indicator row"""
         row = self.table.rowCount()
@@ -779,64 +642,55 @@ class ProductManager(QWidget):
                 self.status_label.setText("Ready")
     
     def update_stats(self):
-        """Update statistics in status bar"""
-        total_rows = self.table.rowCount()
-        
-        if total_rows == 0:
-            self.stats_label.setText("Total: 0 products | Cost Value: $0.00 | Low Stock: 0")
-            return
-            
+        """Recalculate the KPI cards and the status summary."""
+        products_count = 0
         total_value = 0.0
         low_stock = 0
-        
-        for row in range(total_rows):
-            # Get items from each column
-            quantity_item = self.table.item(row, 2)  # Available Stock
-            dozen_item = self.table.item(row, 5)     # Dozen
-            cost_item = self.table.item(row, 10)      # Hidden cost column
-        
-            
-            if quantity_item and dozen_item and cost_item:
-                
-                # Check UserRole data
-                user_role_data = cost_item.data(Qt.UserRole)
-                
-                try:
-                    # Parse quantity
-                    quantity_text = quantity_item.text()
-                    quantity = int(quantity_text) if quantity_text else 0
-                    
-                    # Parse dozen
-                    dozen_text = dozen_item.text()
-                    dozen = float(dozen_text) if dozen_text else 1
-                    
-                    # Get cost value - first try UserRole, then parse text
-                    cost_value = cost_item.data(Qt.UserRole)
-                    if cost_value is None:
-                        cost_text = cost_item.text()
-                        cost_value = float(cost_text) if cost_text else 0.0
-                    
-                    # Add to total value
-                    total_value += cost_value * dozen
-                    
-                    # Check for low stock
-                    if quantity <= 10:
-                        low_stock += 1
-                        
-                except (ValueError, AttributeError, TypeError) as e:
-                    continue
-            else:
-                pass
-        
-        # Format the status text
-        if self.current_search_term:
-            stats_text = f"Found: {total_rows} products | Cost Value: ${total_value:,.2f} | Low Stock: {low_stock}"
-        else:
-            stats_text = f"Total: {total_rows} products | Cost Value: ${total_value:,.2f} | Low Stock: {low_stock}"
-        
-        self.stats_label.setText(stats_text)
-    
+        out_of_stock = 0
 
+        for row in range(self.table.rowCount()):
+            cost_item = self.table.item(row, 10)
+            if cost_item is None:
+                continue
+
+            products_count += 1
+
+            try:
+                cost_value = float(cost_item.data(Qt.UserRole) or 0.0)
+            except (TypeError, ValueError):
+                cost_value = 0.0
+
+            try:
+                stock = int(cost_item.data(Qt.UserRole + 1) or 0)
+            except (TypeError, ValueError):
+                stock = 0
+
+            dozen_item = self.table.item(row, 5)
+            try:
+                dozen = float(dozen_item.text().replace(",", "")) if dozen_item and dozen_item.text() else 1.0
+            except ValueError:
+                dozen = 1.0
+
+            total_value += cost_value * dozen
+
+            if stock <= 0:
+                out_of_stock += 1
+            elif stock <= theme.LOW_STOCK_LIMIT:
+                low_stock += 1
+
+        self.stat_cards["products"].set_value(f"{products_count:,}")
+        self.stat_cards["cost"].set_value(f"${total_value:,.2f}")
+        self.stat_cards["low"].set_value(f"{low_stock:,}")
+        self.stat_cards["out"].set_value(f"{out_of_stock:,}")
+
+        prefix = "Found" if self.current_search_term else "Total"
+        self.stats_label.setText(
+            f"{prefix}: {products_count:,} products   •   "
+            f"Cost Value: ${total_value:,.2f}   •   "
+            f"Low Stock: {low_stock:,}   •   Out of Stock: {out_of_stock:,}"
+        )
+        if hasattr(self, "count_label"):
+            self.count_label.setText(f"{products_count:,} items")
     def open_add_batch_dialog(self):
         if not self.selected_product_ids:
             QMessageBox.warning(self, "No Selection", "Please select a product first")

@@ -13,6 +13,7 @@ from services.supplier_service import SupplierService
 from services.bank_account_service import BankAccountService
 from ui.pages.batch_transaction_history_dialog import BatchTransactionHistoryDialog
 from ui.components.ethiopian_date import EthiopianDateEdit, EthiopianDateConverter
+from ui.components import theme
 import logging
 from datetime import date
 
@@ -37,14 +38,12 @@ class DamageBatchDialog(QDialog):
         product_name = self.batch.product.name if hasattr(self.batch, 'product') else "Unknown"
         
         info_frame = QFrame()
-        info_frame.setStyleSheet("""
-            QFrame {
-                background-color: #f8f9fa;
-                border: 1px solid #dee2e6;
-                border-radius: 5px;
-                padding: 10px;
-            }
-        """)
+        info_frame.setStyleSheet(
+            f"QFrame {{"
+            f"  background-color: {theme.CANVAS}; border: 1px solid {theme.BORDER};"
+            f"  border-radius: 8px; padding: 10px;"
+            f"}}"
+        )
         info_layout = QVBoxLayout(info_frame)
         
         info_text = QLabel(f"<b>Product:</b> {product_name}<br>"
@@ -90,20 +89,11 @@ class DamageBatchDialog(QDialog):
         # Buttons
         btn_layout = QHBoxLayout()
         cancel_btn = QPushButton("Cancel")
+        theme.style_outline(cancel_btn, theme.SLATE)
         cancel_btn.clicked.connect(self.reject)
         
         save_btn = QPushButton("Report Damage")
-        save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                padding: 8px 16px;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #c0392b;
-            }
-        """)
+        theme.style_filled(save_btn, theme.DANGER, theme.DANGER_DARK)
         save_btn.clicked.connect(self.accept)
         
         btn_layout.addStretch()
@@ -204,12 +194,18 @@ class EditBatchDialog(QDialog):
         product_name = self.batch.product.name if hasattr(self.batch, 'product') else "Unknown"
         info = QLabel(f"<b>Product:</b> {product_name}")
         info.setTextFormat(Qt.RichText)
-        info.setStyleSheet("background-color: #e8f4fd; padding: 10px; border-radius: 4px;")
+        info.setStyleSheet(
+            f"background-color: {theme.SELECTION}; color: {theme.TEXT}; "
+            f"padding: 10px; border-radius: 8px;"
+        )
         layout.addWidget(info)
 
         # Batch fields
         batch_frame = QFrame()
-        batch_frame.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; padding: 10px;")
+        batch_frame.setStyleSheet(
+            f"background-color: {theme.CANVAS}; border: 1px solid {theme.BORDER}; "
+            f"border-radius: 8px; padding: 10px;"
+        )
         batch_layout = QFormLayout(batch_frame)
 
         self.qty_spin = QSpinBox()
@@ -237,7 +233,10 @@ class EditBatchDialog(QDialog):
         # Purchase / payment fields (if the batch belongs to a purchase)
         if self.purchase:
             purchase_frame = QFrame()
-            purchase_frame.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; padding: 10px;")
+            purchase_frame.setStyleSheet(
+                f"background-color: {theme.CANVAS}; border: 1px solid {theme.BORDER}; "
+                f"border-radius: 8px; padding: 10px;"
+            )
             purchase_layout = QFormLayout(purchase_frame)
 
             # Supplier
@@ -284,20 +283,11 @@ class EditBatchDialog(QDialog):
         # Buttons
         btn_layout = QHBoxLayout()
         cancel_btn = QPushButton("Cancel")
+        theme.style_outline(cancel_btn, theme.SLATE)
         cancel_btn.clicked.connect(self.reject)
 
         save_btn = QPushButton("Save Changes")
-        save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                padding: 8px 16px;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-        """)
+        theme.style_filled(save_btn, theme.PRIMARY, theme.PRIMARY_DARK)
         save_btn.clicked.connect(self.accept)
 
         btn_layout.addStretch()
@@ -430,165 +420,166 @@ class ProductDetailsDialog(QDialog):
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(20, 20, 20, 16)
+        main_layout.setSpacing(16)
 
-        # Title with larger bold font
-        title_label = QLabel(f"Product Details: {self.product_data['name']}")
-        title_font = QFont("Segoe UI", 18, QFont.Bold)  # Increased size
-        title_label.setFont(title_font)
-        title_label.setStyleSheet("color: #2c3e50;")
-        title_label.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(title_label)
+        # ==================== HEADER ====================
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(12)
 
-        self.product_info_widget = self.create_product_info_section()
-        main_layout.addWidget(self.product_info_widget, 0)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
 
-        # Batch information section label
-        batches_label = QLabel("Batch Information")
-        batches_font = QFont("Segoe UI", 16, QFont.Bold)  # Increased size
-        batches_label.setFont(batches_font)
-        batches_label.setStyleSheet("color: #2c3e50; margin-top: 10px;")
-        main_layout.addWidget(batches_label)
+        self.title_label = QLabel(self.product_data["name"])
+        self.title_label.setFont(QFont(theme.FONT, 15, QFont.Bold))
+        self.title_label.setStyleSheet(f"color: {theme.TEXT};")
 
-        # Batch table
+        unit = self.product_data.get("unit")
+        subtitle_text = "Product details and batch history"
+        if unit:
+            subtitle_text = f"Unit: {unit}   •   {subtitle_text}"
+
+        subtitle = QLabel(subtitle_text)
+        subtitle.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
+
+        title_box.addWidget(self.title_label)
+        title_box.addWidget(subtitle)
+
+        header_layout.addLayout(title_box)
+        header_layout.addStretch()
+        main_layout.addWidget(header)
+
+        # ==================== KPI CARDS ====================
+        main_layout.addLayout(self.create_info_cards())
+
+        # ==================== BATCH CARD ====================
+        batch_card = theme.card_frame()
+        batch_layout = QVBoxLayout(batch_card)
+        batch_layout.setContentsMargins(0, 0, 0, 6)
+        batch_layout.setSpacing(0)
+
+        batch_header, self.batch_count_label = theme.card_section_header(
+            "Batch Information", "0 batches"
+        )
+
         self.batch_table = self.create_batch_table()
-        main_layout.addWidget(self.batch_table, 1)
+        batch_layout.addWidget(batch_header)
+        batch_layout.addWidget(self.batch_table)
 
+        main_layout.addWidget(batch_card, 1)
+
+        # ==================== FOOTER ====================
         button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(0, 0, 0, 0)
 
         self.close_button = QPushButton("Close")
-        self.close_button.setMinimumHeight(45)  # Larger button
-        close_font = QFont("Segoe UI", 12, QFont.Bold)
-        self.close_button.setFont(close_font)
+        self.close_button.setMinimumWidth(120)
+        theme.style_filled(self.close_button, theme.SLATE, theme.SLATE_DARK)
         self.close_button.clicked.connect(self.accept)
 
         button_layout.addStretch()
         button_layout.addWidget(self.close_button)
 
         main_layout.addLayout(button_layout)
+    def create_info_cards(self):
+        """Four KPI cards mirroring the product list page."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(14)
 
-    def create_product_info_section(self):
-        widget = QFrame()
-        widget.setStyleSheet("""
-            QFrame {
-                background-color: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                padding: 5px;
-            }
-        """)
-        layout = QGridLayout(widget)
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(0)
+        try:
+            price = float(self.product_data.get("price") or 0.0)
+        except (TypeError, ValueError):
+            price = 0.0
+        try:
+            stock = int(self.product_data.get("stock") or 0)
+        except (TypeError, ValueError):
+            stock = 0
 
-        # Fonts for labels and values
-        label_font = QFont("Segoe UI", 13, QFont.Bold)
-        value_font = QFont("Segoe UI", 14, QFont.Bold)
+        self.card_price = theme.StatCard("Unit Price", f"${price:,.2f}", theme.PRIMARY, "💵")
+        self.lbl_price = self.card_price.value_label
 
-        # Price
-        price_label = QLabel("Price:")
-        price_label.setFont(label_font)
-        layout.addWidget(price_label, 1, 0)
+        self.card_stock = theme.StatCard("Available Stock", f"{stock:,}", theme.SUCCESS, "📦")
+        self.lbl_stock = self.card_stock.value_label
 
-        self.lbl_price = QLabel(f"${self.product_data['price']:.2f}")
-        self.lbl_price.setFont(value_font)
-        layout.addWidget(self.lbl_price, 1, 1)
+        self.card_total = theme.StatCard(
+            "Total Stock",
+            theme.format_number(self.product_data.get("total_quantity") or 0),
+            theme.PURPLE,
+            "🧮",
+        )
+        self.lbl_total = self.card_total.value_label
 
+        self.card_batches = theme.StatCard(
+            "Batches", str(self.product_data.get("total_batches") or 0), theme.SLATE, "🗂️"
+        )
+        self.lbl_batches = self.card_batches.value_label
 
-        # Available Stock
-        stock_label = QLabel("Available Stock:")
-        stock_label.setFont(label_font)
-        layout.addWidget(stock_label, 2, 0)
+        for card in (self.card_price, self.card_stock, self.card_total, self.card_batches):
+            row.addWidget(card)
 
-        self.lbl_stock = QLabel(str(self.product_data["stock"]))
-        self.lbl_stock.setFont(value_font)
-        if self.product_data["stock"] <= 10:
-            self.lbl_stock.setStyleSheet("color: #e74c3c; font-weight: bold;")
-        elif self.product_data["stock"] <= 50:
-            self.lbl_stock.setStyleSheet("color: #f39c12; font-weight: bold;")
-        else:
-            self.lbl_stock.setStyleSheet("color: #27ae60; font-weight: bold;")
-        layout.addWidget(self.lbl_stock, 2, 1)
+        self.apply_stock_tone(stock)
+        return row
 
-        # Number of Batches
-        batches_label = QLabel("Number of Batches:")
-        batches_label.setFont(label_font)
-        layout.addWidget(batches_label, 3, 0)
-
-        self.lbl_batches = QLabel(str(self.product_data["total_batches"]))
-        self.lbl_batches.setFont(value_font)
-        layout.addWidget(self.lbl_batches, 3, 1)
-
-        return widget
-
+    def apply_stock_tone(self, stock):
+        """Colour the available-stock card by stock level."""
+        self.card_stock.set_color(theme.stock_color(stock))
     def create_batch_table(self):
         table = QTableWidget()
         table.setColumnCount(6)
         table.setHorizontalHeaderLabels([
-            "Purchase Date", "Supplier Name", "Quantity", "Available", "Cost Price", "Actions"
+            "PURCHASE DATE", "SUPPLIER", "QUANTITY", "AVAILABLE", "COST PRICE", "ACTIONS"
         ])
 
-        # --- Accessibility: larger bold font ---
-        font = QFont()
-        font.setPointSize(18)
-        font.setBold(True)
-        table.setFont(font)
+        header = theme.style_table(table)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
 
-        table.setStyleSheet("""
-            QTableWidget {
-                font-size: 18px;
-                font-weight: bold;
-            }
-            QHeaderView::section {
-                font-size: 18px;
-                font-weight: bold;
-                padding: 12px;
-            }
-            QTableWidget::item {
-                padding: 15px;
-            }
-        """)
+        table.setColumnWidth(0, 170)
+        table.setColumnWidth(2, 110)
+        table.setColumnWidth(3, 130)
+        table.setColumnWidth(4, 130)
+        table.setColumnWidth(5, 322)
 
-        header = table.horizontalHeader()
-        table.setColumnWidth(0, 180)   # Purchase Date (wider for Ethiopian dd/mm/yyyy)
-        table.setColumnWidth(1, 250)   # Supplier Name
-        table.setColumnWidth(2, 140)   # Quantity
-        table.setColumnWidth(3, 140)   # Available
-        table.setColumnWidth(4, 150)   # Cost Price
-        table.setColumnWidth(5, 240)   # Actions (wider for larger buttons)
-
-
-        # header.setSectionResizeMode(0, QHeaderView.Stretch)
-
-        table.setAlternatingRowColors(True)
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
+        theme.align_header(table, 4, Qt.AlignRight | Qt.AlignVCenter)
+        theme.align_header(table, 5, Qt.AlignCenter)
 
         return table
-
     def load_batch_details(self):
         try:
             batch_info = self.new_product_service.get_batches_with_product(self.product_id)
 
-            if not batch_info:
-                return
-            
-            batch_info = list(reversed(batch_info))
-
             self.batch_table.setRowCount(0)
 
-            for batch in batch_info:
+            if not batch_info:
+                self.batch_count_label.setText("0 batches")
+                self.show_empty_batches()
+                return
+
+            for batch in reversed(list(batch_info)):
                 self.add_batch_row(batch)
+
+            self.batch_count_label.setText(f"{self.batch_table.rowCount()} batches")
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load batch details:\n{e}")
 
+    def show_empty_batches(self):
+        """Placeholder row shown when the product has no batches yet."""
+        self.batch_table.setRowCount(1)
+
+        item = QTableWidgetItem("No batches recorded for this product yet")
+        item.setTextAlignment(Qt.AlignCenter)
+        item.setForeground(QColor(theme.MUTED))
+        item.setFont(QFont(theme.FONT, 10))
+
+        self.batch_table.setItem(0, 0, item)
+        self.batch_table.setSpan(0, 0, 1, self.batch_table.columnCount())
+        self.batch_table.setRowHeight(0, 60)
     def add_batch_row(self, batch):
         row = self.batch_table.rowCount()
         self.batch_table.insertRow(row)
-        self.batch_table.setRowHeight(row, 110)
 
         purchase_date = batch.purchase.purchase_date if batch.purchase else None
         if purchase_date:
@@ -597,89 +588,68 @@ class ProductDetailsDialog(QDialog):
         else:
             date_str = "N/A"
 
-        supplier_name = batch.purchase.supplier.supplier_name if batch.purchase and batch.purchase.supplier else "N/A"
-        self.batch_table.setItem(row, 0, QTableWidgetItem(date_str))
-        self.batch_table.setItem(row, 1, QTableWidgetItem(str(supplier_name)))
-        self.batch_table.setItem(row, 2, QTableWidgetItem(str(batch.quantity)))
-        self.batch_table.setItem(row, 3, QTableWidgetItem(str(batch.available_quantity)))
-        self.batch_table.setItem(row, 4, QTableWidgetItem(str(batch.cost_price)))
+        supplier_name = (
+            batch.purchase.supplier.supplier_name
+            if batch.purchase and batch.purchase.supplier else "N/A"
+        )
 
-        # Action Buttons
-        actions_widget = self.create_batch_action_buttons(batch.id)
-        self.batch_table.setCellWidget(row, 5, actions_widget)
+        date_item = QTableWidgetItem(date_str)
+        date_item.setForeground(QColor(theme.TEXT))
+        self.batch_table.setItem(row, 0, date_item)
 
+        supplier_item = QTableWidgetItem(str(supplier_name))
+        supplier_item.setFont(QFont(theme.FONT, 10, QFont.DemiBold))
+        supplier_item.setForeground(QColor(theme.TEXT))
+        supplier_item.setToolTip(str(supplier_name))
+        self.batch_table.setItem(row, 1, supplier_item)
+
+        qty_item = QTableWidgetItem(theme.format_number(batch.quantity))
+        qty_item.setTextAlignment(Qt.AlignCenter)
+        qty_item.setForeground(QColor(theme.MUTED))
+        self.batch_table.setItem(row, 2, qty_item)
+
+        self.batch_table.setCellWidget(row, 3, theme.stock_badge(batch.available_quantity))
+
+        try:
+            cost_value = float(batch.cost_price or 0)
+        except (TypeError, ValueError):
+            cost_value = 0.0
+
+        cost_item = QTableWidgetItem(f"${cost_value:,.2f}")
+        cost_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        cost_item.setFont(QFont(theme.FONT, 10, QFont.DemiBold))
+        cost_item.setForeground(QColor(theme.TEXT))
+        self.batch_table.setItem(row, 4, cost_item)
+
+        self.batch_table.setCellWidget(row, 5, self.create_batch_action_buttons(batch.id))
+
+        self.batch_table.setRowHeight(row, theme.ROW_HEIGHT)
     def create_batch_action_buttons(self, batch_id):
-        widget = QWidget()
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(5, 0, 5, 0)
-        layout.setSpacing(5)
+        view_btn = theme.action_button("View", "View batch transaction history", theme.PRIMARY, 50)
+        view_btn.clicked.connect(lambda checked=False, bid=batch_id: self.view_batch_details(bid))
 
-        button_size = 45
-        btn_font = QFont("Segoe UI", 18)
+        edit_btn = theme.action_button("Edit", "Edit batch and purchase", theme.WARNING, 46)
 
-        view_btn = QPushButton("👁️")
-        view_btn.setFixedSize(button_size, button_size)
-        view_btn.setFont(btn_font)
-        view_btn.setToolTip("View Batch Details")
-        view_btn.clicked.connect(lambda checked, bid=batch_id: self.view_batch_details(bid))
+        damage_btn = theme.action_button("Damage", "Report damaged stock", theme.ORANGE, 62)
+        damage_btn.clicked.connect(lambda checked=False, bid=batch_id: self.report_damage(bid))
 
-        edit_btn = QPushButton("✏️")
-        edit_btn.setFixedSize(button_size, button_size)
-        edit_btn.setFont(btn_font)
-        edit_btn.setToolTip("Edit Batch (Admin only)")
-        if not self.is_user_admin():
+        discount_btn = theme.action_button(
+            "Discount", "Apply a discount to the remaining quantity", theme.PURPLE, 68
+        )
+        discount_btn.clicked.connect(lambda checked=False, bid=batch_id: self.apply_discount(bid))
+
+        delete_btn = theme.action_button("Delete", "Delete batch", theme.DANGER, 56)
+
+        if self.is_user_admin():
+            edit_btn.clicked.connect(lambda checked=False, bid=batch_id: self.edit_batch(bid))
+            delete_btn.clicked.connect(lambda checked=False, bid=batch_id: self.delete_batch(bid))
+        else:
             edit_btn.setEnabled(False)
-            edit_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #f8f9fa;
-                    color: #bdc3c7;
-                    border: 1px solid #ecf0f1;
-                    border-radius: 4px;
-                }
-            """)
-            edit_btn.setToolTip("Edit Batch - Admin access required")
-        else:
-            edit_btn.clicked.connect(lambda checked, bid=batch_id: self.edit_batch(bid))
-
-        damage_btn = QPushButton("⚠️")
-        damage_btn.setFixedSize(button_size, button_size)
-        damage_btn.setFont(btn_font)
-        damage_btn.setToolTip("Report Damage")
-        damage_btn.clicked.connect(lambda checked, bid=batch_id: self.report_damage(bid))
-
-        discount_btn = QPushButton("💲")
-        discount_btn.setFixedSize(button_size, button_size)
-        discount_btn.setFont(btn_font)
-        discount_btn.setToolTip("Apply discount to remaining quantity")
-        discount_btn.clicked.connect(lambda checked, bid=batch_id: self.apply_discount(bid))
-
-
-        delete_btn = QPushButton("🗑️")
-        delete_btn.setFixedSize(button_size, button_size)
-        delete_btn.setFont(btn_font)
-        delete_btn.setToolTip("Delete Batch (Admin only)")
-        if not self.is_user_admin():
+            edit_btn.setToolTip("Edit batch — admin access required")
             delete_btn.setEnabled(False)
-            delete_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #f8f9fa;
-                    color: #bdc3c7;
-                    border: 1px solid #ecf0f1;
-                    border-radius: 4px;
-                }
-            """)
-            delete_btn.setToolTip("Delete Batch - Admin access required")
-        else:
-            delete_btn.clicked.connect(lambda checked, bid=batch_id: self.delete_batch(bid))
+            delete_btn.setToolTip("Delete batch — admin access required")
 
-        layout.addWidget(view_btn)
-        layout.addWidget(edit_btn)
-        layout.addWidget(damage_btn)
-        layout.addWidget(discount_btn)
-        layout.addWidget(delete_btn)
-
-        return widget
-    
+        return theme.action_cell([view_btn, edit_btn, damage_btn, discount_btn, delete_btn])
     def apply_discount(self, batch_id):
         try:
             batch = self.new_product_service.get_batch_by_id(batch_id)
@@ -774,34 +744,37 @@ class ProductDetailsDialog(QDialog):
                 QMessageBox.critical(self, "Error", "Failed to delete batch.")
 
     def refresh_product_info(self):
-        """Reload product data and update info labels."""
+        """Reload product data and update the KPI cards."""
         product = self.new_product_service.get_by_id(self.product_id)
-        if product:
-            batch_count = self.product_batch_service.count_by_product(product.id)
-            self.product_data = {
-                "id": product.id,
-                "name": product.name,
-                "stock": product.available_quantity,
-                "total_quantity": product.total_quantity,
-                "price": product.selling_price,
-                "unit": product.unit,
-                "total_batches": batch_count
-            }
-            # Update labels
-            # self.lbl_name.setText(self.product_data["name"])
-            self.lbl_price.setText(f"${self.product_data['price']:.2f}")
-            # self.lbl_unit.setText(self.product_data["unit"])
-            self.lbl_stock.setText(str(self.product_data["stock"]))
-            # Reapply stock level style
-            if self.product_data["stock"] <= 10:
-                self.lbl_stock.setStyleSheet("color: #e74c3c; font-weight: bold;")
-            elif self.product_data["stock"] <= 50:
-                self.lbl_stock.setStyleSheet("color: #f39c12; font-weight: bold;")
-            else:
-                self.lbl_stock.setStyleSheet("color: #27ae60; font-weight: bold;")
-            # self.lbl_total.setText(str(self.product_data["total_quantity"]))
-            self.lbl_batches.setText(str(batch_count))
+        if not product:
+            return
 
+        batch_count = self.product_batch_service.count_by_product(product.id)
+        self.product_data = {
+            "id": product.id,
+            "name": product.name,
+            "stock": product.available_quantity,
+            "total_quantity": product.total_quantity,
+            "price": product.selling_price,
+            "unit": product.unit,
+            "total_batches": batch_count,
+        }
+
+        try:
+            price = float(self.product_data.get("price") or 0.0)
+        except (TypeError, ValueError):
+            price = 0.0
+
+        try:
+            stock = int(self.product_data.get("stock") or 0)
+        except (TypeError, ValueError):
+            stock = 0
+
+        self.lbl_price.setText(f"${price:,.2f}")
+        self.lbl_stock.setText(f"{stock:,}")
+        self.lbl_total.setText(theme.format_number(self.product_data.get("total_quantity") or 0))
+        self.lbl_batches.setText(str(batch_count))
+        self.apply_stock_tone(stock)
     def report_damage(self, batch_id):
         """Report damage for a batch"""
         try:
