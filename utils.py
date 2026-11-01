@@ -1,6 +1,7 @@
 import os
 import sys
 import shutil
+import sqlite3
 from pathlib import Path
 from datetime import datetime
 
@@ -140,8 +141,46 @@ def _prune_old_backups(backup_dir, max_backups=30):
             pass
 
 
+def _snapshot_sqlite(source, destination):
+    """Snapshot a live SQLite database without tearing a write in progress.
+
+    A plain file copy can miss committed data still sitting in the -wal file,
+    or capture a torn page mid-write. SQLite's online backup API produces a
+    clean, self-contained snapshot without blocking writers. Falls back to a
+    byte copy if the API is unavailable for any reason.
+    """
+    try:
+        src = sqlite3.connect(str(source))
+        try:
+            dst = sqlite3.connect(str(destination))
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+    except sqlite3.Error:
+        shutil.copy2(source, destination)
+
+
+def _unique_backup_path(backup_base, timestamp):
+    """A .db backup path that no other snapshot taken this second already uses.
+
+    Two slots replayed by the startup catch-up land in the same second; a
+    same-named file would overwrite the first snapshot (and its notification
+    would be de-duplicated), so suffix the name to keep every backup its own
+    file.
+    """
+    backup_file = backup_base / f'db_backup_{timestamp}.db'
+    counter = 0
+    while backup_file.exists():
+        counter += 1
+        backup_file = backup_base / f'db_backup_{timestamp}_{counter}.db'
+    return backup_file
+
+
 def backup_database(db_name='inventory.db', source_path=None, backup_dir=None, max_backups=30):
-    """Copy the active SQLite database into the backups directory."""
+    """Snapshot the live SQLite database into the backups directory."""
     source = Path(source_path) if source_path else Path(get_database_path(db_name))
     if not source.exists():
         raise FileNotFoundError(f'Database file not found at {source}')
@@ -150,16 +189,8 @@ def backup_database(db_name='inventory.db', source_path=None, backup_dir=None, m
     backup_base.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    backup_file = backup_base / f'db_backup_{timestamp}.db'
-    # Two slots replayed by the startup catch-up land in the same second; a
-    # same-named file would overwrite the first snapshot (and its notification
-    # would be de-duplicated), so suffix the name to keep every backup its own
-    # file.
-    counter = 0
-    while backup_file.exists():
-        counter += 1
-        backup_file = backup_base / f'db_backup_{timestamp}_{counter}.db'
-    shutil.copy2(source, backup_file)
+    backup_file = _unique_backup_path(backup_base, timestamp)
+    _snapshot_sqlite(source, backup_file)
     _prune_old_backups(backup_base, max_backups=max_backups)
     return str(backup_file)
 

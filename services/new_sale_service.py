@@ -1916,14 +1916,14 @@ class NewSaleService(BaseService[ProfessionalSale]):
 
         if activity['sale_count'] > 0:
             blocks.append(
-                f"🛒 *(አዲስ የገባ የዱቤ ሽያጭ):* {activity['sale_count']} sale(s)"
-                f"   →   + ETB {activity['total_sales_amount']:,.2f}"
+                f"🛒 *(አዲስ የተወሰደ):* →"
+                f"   + ETB {activity['total_sales_amount']:,.2f}"
             )
 
         if activity['payment_count'] > 0:
             payment_lines = [
-                f"💰 *(የተከፈለ):* {activity['payment_count']} ክፍያዎች"
-                f"   →   - ETB {activity['total_payments_amount']:,.2f}"
+                f"💰 *(የተከፈለ):* →"
+                f"   - ETB {activity['total_payments_amount']:,.2f}"
             ]
             for bank in activity.get('payments_by_bank') or []:
                 payment_lines.append(
@@ -2132,6 +2132,189 @@ class NewSaleService(BaseService[ProfessionalSale]):
                 })
 
             return result, total
+
+    def get_credit_customers_all(self, short_term_only: bool = False) -> List[Dict]:
+        """Return every customer with credit/partial sales as one list.
+
+        The credit overview dialog caches this list and filters it in memory,
+        so typing in its search box never runs a database query or a thread.
+        """
+        from models.sale_payment_term import SalePaymentTerm, PaymentStatusEnum
+        from models.customers import Customer
+        from sqlalchemy import func, or_, and_, case
+        from datetime import date
+
+        with get_session() as session:
+            query = session.query(
+                ProfessionalSale.customer_id,
+                func.sum(SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount).label('total_remaining'),
+                func.sum(SalePaymentTerm.total_amount).label('total_amount'),
+                func.sum(SalePaymentTerm.paid_amount).label('paid_amount'),
+                func.min(SalePaymentTerm.due_date).label('earliest_due_date'),
+                func.max(
+                    case(
+                        (
+                            and_(
+                                SalePaymentTerm.due_date == func.date(ProfessionalSale.created_at),
+                                SalePaymentTerm.due_date == date.today(),
+                                (SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount) > 0
+                            ),
+                            1
+                        ),
+                        else_=0
+                    )
+                ).label('has_short_term'),
+                Customer.name.label('customer_name'),
+                Customer.phone.label('customer_phone')
+            ).join(
+                SalePaymentTerm, ProfessionalSale.id == SalePaymentTerm.sale_id
+            ).join(
+                Customer, ProfessionalSale.customer_id == Customer.id
+            ).filter(
+                ProfessionalSale.is_deleted == False,
+                SalePaymentTerm.is_deleted == False,
+                Customer.is_deleted == False,
+                or_(
+                    ProfessionalSale.is_credit_sale == True,
+                    SalePaymentTerm.payment_status.in_([PaymentStatusEnum.CREDIT, PaymentStatusEnum.PARTIAL])
+                )
+            ).group_by(
+                ProfessionalSale.customer_id,
+                Customer.name,
+                Customer.phone
+            )
+
+            if short_term_only:
+                query = query.having(
+                    case(
+                        (
+                            and_(
+                                SalePaymentTerm.due_date == func.date(ProfessionalSale.created_at),
+                                SalePaymentTerm.due_date == date.today(),
+                                (SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount) > 0
+                            ),
+                            1
+                        ),
+                        else_=0
+                    ) == 1
+                )
+
+            order_priority = case(
+                (func.sum(SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount) > 0, 0),
+                else_=1
+            )
+            rows = query.order_by(
+                order_priority,
+                func.sum(SalePaymentTerm.total_amount - SalePaymentTerm.paid_amount).desc()
+            ).all()
+
+            result = []
+            for row in rows:
+                remaining = row.total_remaining or 0.0
+                paid = row.paid_amount or 0.0
+
+                if remaining == 0:
+                    status = 'Paid'
+                elif paid > 0:
+                    status = 'Partial'
+                else:
+                    status = 'Unpaid'
+
+                result.append({
+                    'customer_id': row.customer_id,
+                    'customer_name': row.customer_name,
+                    'customer_phone': row.customer_phone or "",
+                    'total_amount': float(row.total_amount or 0.0),
+                    'paid_amount': float(paid),
+                    'remaining': float(remaining),
+                    'status': status,
+                    'earliest_due_date': row.earliest_due_date,
+                    'has_short_term': bool(row.has_short_term),
+                    'sale_ids': [],
+                    'payment_term_ids': []
+                })
+
+            return result
+
+    def get_all_sales_rows(self) -> List[Dict]:
+        """One snapshot of every sale, for the overview dialog's search.
+
+        The dialog loads this once and filters it in memory, so a keystroke in
+        its search box never runs a database query.
+        """
+        try:
+            with get_session() as session:
+                rows = session.query(
+                    ProfessionalSale.id,
+                    ProfessionalSale.created_at,
+                    ProfessionalSale.customer_id,
+                    Customer.name,
+                    ProfessionalSale.delivery_name,
+                    ProfessionalSale.delivery_phone,
+                    ProfessionalSale.delivery_place,
+                    ProfessionalSale.delivery_Plate,
+                    ProfessionalSale.total_amount,
+                    SalePaymentTerm.payment_status,
+                    ProfessionalSale.items_data.isnot(None),
+                ).outerjoin(
+                    Customer, Customer.id == ProfessionalSale.customer_id
+                ).outerjoin(
+                    SalePaymentTerm, SalePaymentTerm.sale_id == ProfessionalSale.id
+                ).filter(
+                    ProfessionalSale.is_deleted == False
+                ).order_by(
+                    ProfessionalSale.id.desc()
+                ).all()
+
+                product_names: Dict[int, List[str]] = {}
+                for item in session.query(
+                    ProfessionalSaleItem.sale_id,
+                    ProfessionalProduct.name,
+                ).join(
+                    ProductBatch, ProductBatch.id == ProfessionalSaleItem.batch_id
+                ).join(
+                    ProfessionalProduct,
+                    ProfessionalProduct.id == ProductBatch.product_id,
+                ).all():
+                    if item.name:
+                        product_names.setdefault(item.sale_id, []).append(item.name)
+
+            sales: List[Dict] = []
+            seen_ids = set()
+            for (
+                sale_id,
+                created_at,
+                customer_id,
+                customer_name,
+                delivery_name,
+                delivery_phone,
+                delivery_place,
+                delivery_plate,
+                total_amount,
+                payment_status,
+                has_items_data,
+            ) in rows:
+                if sale_id in seen_ids:
+                    continue
+                seen_ids.add(sale_id)
+                sales.append({
+                    "id": sale_id,
+                    "created_at": created_at,
+                    "customer_id": customer_id,
+                    "customer_name": customer_name or "",
+                    "delivery_name": delivery_name or "",
+                    "delivery_phone": delivery_phone or "",
+                    "delivery_place": delivery_place or "",
+                    "delivery_plate": delivery_plate or "",
+                    "total_amount": total_amount or 0.0,
+                    "payment_status": payment_status,
+                    "has_items_data": bool(has_items_data),
+                    "products": product_names.get(sale_id, []),
+                })
+            return sales
+        except Exception as e:
+            logger.error(f"Error in get_all_sales_rows: {e}", exc_info=True)
+            return []
 
     def get_product_performance_with_companions(
         self,

@@ -376,8 +376,23 @@ async def run_monthly_marketing_campaign(bot_token: str):
 # Daily Database Backup
 # ---------------------------------------------------------------------
 async def queue_daily_database_backup():
-    """Create a daily backup of the active SQLite database."""
-    backup_file = await asyncio.to_thread(backup_database)
+    """Create a backup of the SQLite database and send it to the admin."""
+    try:
+        backup_file = await asyncio.to_thread(backup_database)
+    except Exception as e:
+        # Without this the twice-daily offsite copy would just stop, and the
+        # admin would only find out when a restore was needed.
+        logger.exception("Database backup failed: %s", e)
+        queue_notification('generic_message', ADMIN_ID, {
+            'text': (
+                "⚠️ <b>Database backup failed</b>\n"
+                f"{e}\n\n"
+                "No offsite copy was uploaded — please check the PC and make one manually."
+            ),
+            'parse_mode': 'HTML',
+        })
+        return
+
     logger.info("Created database backup at %s", backup_file)
     # Offsite copy: the outbox uploads the file to the admin on Telegram.
     queue_notification('database_backup', ADMIN_ID, {'file_path': str(backup_file)})

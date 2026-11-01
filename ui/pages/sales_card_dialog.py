@@ -19,6 +19,7 @@ from services.purchase_service import PurchaseService
 from services.bank_account_service import BankAccountService
 from services.new_product_service import NewProductService
 from ui.utils.worker import Worker
+from ui.utils.sales_search import SalesSearchIndex
 from telegrambot.bot import notify_store_team_sync, is_bot_ready
 from ui.pages.expense_overview_dialog import ExpenseOverviewDialog
 from services.amharic_service import to_amharic as convert_to_amharic
@@ -2896,7 +2897,6 @@ class AllSalesOverviewDialog(QDialog):
         self.current_page = 1
         self.total_pages = 1
         self.is_loading = False
-        self.all_loaded = False
         self.current_search = ""
         self.current_date_search = ""
         self._closed = False
@@ -2905,25 +2905,24 @@ class AllSalesOverviewDialog(QDialog):
         self._retiring = []  # abandoned (thread, worker) pairs kept alive
                               # until they finish, so PySide can't GC a
                               # QThread while it's still actually running
-        self.search_version = 0
         self._load_version = 0
-        self.fuzzy_mode = False
-        self._fuzzy_attempted = False
 
-        # Debounce timers
-        self.search_timer = QTimer(self)
-        self.search_timer.setSingleShot(True)
-        self.search_timer.timeout.connect(self._perform_search)
+        # Snapshot + in-memory filtering: every sale is read once, then each
+        # keystroke filters that list without a database query or a thread.
+        self.all_sales = []
+        self.filtered_sales = []
+        self.search_index = SalesSearchIndex()
 
-        self.date_search_timer = QTimer(self)
-        self.date_search_timer.setSingleShot(True)
-        self.date_search_timer.timeout.connect(self._perform_date_search)
+        # Small debounce so a fast typing burst rebuilds the table once
+        self.filter_timer = QTimer(self)
+        self.filter_timer.setSingleShot(True)
+        self.filter_timer.timeout.connect(self.apply_filter)
         self.init_ui()
         self.setMinimumSize(0, 0)
         self.setMaximumSize(16777215, 16777215)
         screen_geometry = QApplication.primaryScreen().availableGeometry()
         self.setGeometry(screen_geometry)
-        self.load_page(reset=True)
+        self.load_data()
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -3050,26 +3049,14 @@ class AllSalesOverviewDialog(QDialog):
 
         main_layout.addWidget(content_widget, 1)
     def on_search_changed(self, text):
-        """Debounced search – triggers after 300ms of no typing."""
-        self.current_search = text
-        self.fuzzy_mode = False          # reset to exact search
-        self._fuzzy_attempted = False    # allow fallback again
-        self.search_version += 1
-        self.search_timer.start(300)
+        """Debounced search over the cached snapshot - no database work."""
+        self.current_search = text.strip()
+        self.filter_timer.start(120)
 
-    def _perform_search(self):
-        """Actually load the first page with the current search term."""
-        self.load_page(reset=True)
-        
     def on_date_search_changed(self, text):
-        """Debounced date search."""
-        self.current_date_search = text
-        self.search_version += 1          # date changes also count as a new search version
-        self.date_search_timer.start(300)
-
-    def _perform_date_search(self):
-        """Actually load the first page with the current date search term."""
-        self.load_page(reset=True)
+        """Debounced date filter over the cached snapshot."""
+        self.current_date_search = text.strip()
+        self.filter_timer.start(120)
 
     def clear_date_search(self):
         """Clear the date search field."""
@@ -3130,91 +3117,78 @@ class AllSalesOverviewDialog(QDialog):
 
         thread.finished.connect(_cleanup)
 
-    def load_page(self, reset=False):
-        # A fresh search (reset=True) always supersedes whatever is in
-        # flight — never block the UI waiting on the old worker. Its
-        # eventual result is discarded by the _load_version check below
-        # once it arrives, so it's safe to just move on.
-        if not reset and (self.is_loading or self.all_loaded):
-            return
+    def load_data(self):
+        """Fetch the whole sales snapshot once, in a background thread.
 
+        Search and date filtering then run on this snapshot in memory, so a
+        keystroke never touches the database and no thread is torn down while
+        it is still running.
+        """
         if self.thread is not None:
             self._retire_thread(self.thread, self.worker)
             self.thread = None
             self.worker = None
 
+        self._load_version += 1
+        version = self._load_version
         self.is_loading = True
+        self.table.setRowCount(0)
+        self.loading_label.show()
+        self.table.hide()
+        if hasattr(self, "count_label"):
+            self.count_label.setText("Loading...")
 
-        if reset:
-            self.current_page = 1
-            self.all_loaded = False
-            self.table.setRowCount(0)
-            self.loading_label.show()
-            self.table.hide()
+        self.thread = QThread()
+        self.worker = Worker(self._fetch_rows, version)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self._on_rows_loaded)
+        self.worker.error.connect(self._on_page_error)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.start()
 
-            if hasattr(self, "count_label"):
-                self.count_label.setText("Loading...")
-
-            self._load_version = self.search_version
-
-        if reset:
-            self.thread = QThread()
-            self.worker = Worker(self._fetch_page_data)
-            self.worker.moveToThread(self.thread)
-            self.thread.started.connect(self.worker.run)
-            self.worker.finished.connect(self._on_page_loaded)
-            self.worker.error.connect(self._on_page_error)
-            self.worker.finished.connect(self.thread.quit)
-            self.worker.finished.connect(self.worker.deleteLater)
-            self.thread.finished.connect(self.thread.deleteLater)
-            self.thread.start()
-        else:
-            self._fetch_and_append()
-    
-    def _fetch_page_data(self):
+    def _fetch_rows(self, version):
         from services.new_sale_service import NewSaleService
-        service = NewSaleService()
-        filter_date = self.get_filter_date()
-        sales, total = service.get_all_sales_paginated(
-            page=self.current_page,
-            page_size=self.page_size,
-            search=self.current_search,
-            filter_date=filter_date,
-            fuzzy=self.fuzzy_mode
-        )
-        return sales, total
-    
-    def _on_page_loaded(self, result):
+        return version, NewSaleService().get_all_sales_rows()
+
+    def _on_rows_loaded(self, result):
         if self._closed:
             return
-        if self._load_version != self.search_version:
-            self.is_loading = False
-            self.loading_label.hide()
-            self.table.show()
-            return
+        version, rows = result
+        if version != self._load_version:
+            return   # a newer load already superseded this one
 
-        sales, total = result
-
-        # Auto‑fallback fuzzy
-        if total == 0 and self.current_search and not self._fuzzy_attempted:
-            self.fuzzy_mode = True
-            self._fuzzy_attempted = True
-            self.is_loading = False
-            # Defer to avoid recursive thread issues
-            QTimer.singleShot(0, lambda: self.load_page(reset=True))
-            return
-
-        # Normal processing
-        self.total_pages = (total + self.page_size - 1) // self.page_size
-        self.append_rows(sales)
-
-        if self.current_page >= self.total_pages:
-            self.all_loaded = True
-
-        self.current_page += 1
+        self.all_sales = rows
+        self.search_index = SalesSearchIndex(rows)
         self.is_loading = False
+        self.loading_label.hide()
+        self.table.show()
+        self.apply_filter()
 
-        if self.fuzzy_mode and total > 0:
+    def _on_page_error(self, error):
+        if self._closed:
+            return
+        self.is_loading = False
+        self.loading_label.setText(f"Error loading sales: {error}")
+        QMessageBox.critical(self, "Error", "Failed to load sales data:\n" + str(error))
+        self.loading_label.hide()
+        self.table.show()
+
+    def apply_filter(self):
+        """Filter the cached snapshot and rebuild the table - no DB, no thread."""
+        if self.is_loading:
+            return
+        filter_date = self.get_filter_date()
+        rows, fuzzy_used = self.search_index.filter(self.current_search, filter_date)
+        self.filtered_sales = rows
+        self.total_pages = max(1, (len(rows) + self.page_size - 1) // self.page_size)
+        self.current_page = 1
+        self.table.setRowCount(0)
+        self.render_page()
+
+        if fuzzy_used and self.current_search:
             self.fuzzy_status_label.setText(
                 f"🔍 Showing fuzzy matches for '{self.current_search}'"
             )
@@ -3222,37 +3196,16 @@ class AllSalesOverviewDialog(QDialog):
         else:
             self.fuzzy_status_label.hide()
 
-        self.loading_label.hide()
-        self.table.show()
-    
-    def _on_page_error(self, error):
-        if self._closed:
+    def render_page(self):
+        """Append the next page of the already-filtered rows."""
+        start = (self.current_page - 1) * self.page_size
+        page_rows = self.filtered_sales[start:start + self.page_size]
+        if not page_rows:
             return
-        self.is_loading = False
-        self.loading_label.setText(f"Error loading sales: {error}")
-        QMessageBox.critical(self, "Error", f"Failed to load sales data:\n{error}")
-        self.loading_label.hide()
-        self.table.show()
-    
-    def _fetch_and_append(self):
-        from services.new_sale_service import NewSaleService
-        service = NewSaleService()
-        filter_date = self.get_filter_date()
-        sales, total = service.get_all_sales_paginated(
-            page=self.current_page,
-            page_size=self.page_size,
-            search=self.current_search,
-            filter_date=filter_date,
-            fuzzy=self.fuzzy_mode
-        )
-        self.total_pages = (total + self.page_size - 1) // self.page_size
-        self.append_rows(sales)
-
-        if self.current_page >= self.total_pages:
-            self.all_loaded = True
-
+        self.append_rows(page_rows)
         self.current_page += 1
-        self.is_loading = False
+        if hasattr(self, "count_label"):
+            self.count_label.setText(f"{len(self.filtered_sales):,} sales")
 
     def append_rows(self, sales):
         start_row = self.table.rowCount()
@@ -3264,21 +3217,21 @@ class AllSalesOverviewDialog(QDialog):
             row = start_row + offset
 
             # Sale ID
-            id_item = QTableWidgetItem(str(sale.id))
+            id_item = QTableWidgetItem(str(sale["id"]))
             id_item.setFont(group_font)
             id_item.setTextAlignment(Qt.AlignCenter)
             id_item.setForeground(QColor(theme.MUTED))
             self.table.setItem(row, 0, id_item)
 
             # Ethiopian date
-            date_item = QTableWidgetItem(self._to_ethiopian_date_str(sale.created_at))
+            date_item = QTableWidgetItem(self._to_ethiopian_date_str(sale["created_at"]))
             date_item.setFont(group_font)
             date_item.setTextAlignment(Qt.AlignCenter)
             date_item.setForeground(QColor(theme.TEXT))
             self.table.setItem(row, 1, date_item)
 
             # Customer
-            customer = sale.customer.name if sale.customer else "N/A"
+            customer = sale["customer_name"] or "N/A"
             cust_item = QTableWidgetItem(customer)
             cust_item.setFont(group_font)
             cust_item.setForeground(QColor(theme.TEXT))
@@ -3287,14 +3240,14 @@ class AllSalesOverviewDialog(QDialog):
 
             # Delivery Address - elide with tooltip
             parts = []
-            if sale.delivery_name:
-                parts.append(sale.delivery_name)
-            if sale.delivery_phone:
-                parts.append(sale.delivery_phone)
-            if sale.delivery_place:
-                parts.append(sale.delivery_place)
-            if sale.delivery_Plate:
-                parts.append(sale.delivery_Plate)
+            if sale["delivery_name"]:
+                parts.append(sale["delivery_name"])
+            if sale["delivery_phone"]:
+                parts.append(sale["delivery_phone"])
+            if sale["delivery_place"]:
+                parts.append(sale["delivery_place"])
+            if sale["delivery_plate"]:
+                parts.append(sale["delivery_plate"])
             delivery_str = ' - '.join(parts) if parts else ''
             delivery_item = QTableWidgetItem(delivery_str)
             delivery_item.setForeground(QColor(theme.MUTED))
@@ -3302,7 +3255,7 @@ class AllSalesOverviewDialog(QDialog):
             self.table.setItem(row, 3, delivery_item)
 
             # Total Amount
-            amount_item = QTableWidgetItem(f"${sale.total_amount:,.2f}")
+            amount_item = QTableWidgetItem(f"${sale['total_amount']:,.2f}")
             amount_item.setFont(group_font)
             amount_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             amount_item.setForeground(QColor(theme.TEXT))
@@ -3325,8 +3278,6 @@ class AllSalesOverviewDialog(QDialog):
             actions_widget = self.create_action_buttons(sale)
             self.table.setCellWidget(row, 6, actions_widget)
 
-        if hasattr(self, "count_label"):
-            self.count_label.setText(f"{self.table.rowCount():,} sales")
     def _to_ethiopian_date_str(self, dt):
         if not dt:
             return ""
@@ -3337,40 +3288,41 @@ class AllSalesOverviewDialog(QDialog):
             return dt.strftime("%Y-%m-%d")
 
     def _get_payment_status(self, sale):
-        if not sale.payment_terms:
+        """Payment status label from a snapshot row (dict)."""
+        status = sale.get("payment_status")
+        if status is None:
             return "Unknown"
-        term = sale.payment_terms[0]
-        if term.payment_status == PaymentStatusEnum.PAID:
+        if status == PaymentStatusEnum.PAID:
             return "Paid"
-        elif term.payment_status == PaymentStatusEnum.CREDIT:
+        if status == PaymentStatusEnum.CREDIT:
             return "Credit"
-        elif term.payment_status == PaymentStatusEnum.PARTIAL:
+        if status == PaymentStatusEnum.PARTIAL:
             return "Partial"
-        else:
-            return term.payment_status.value.capitalize() if term.payment_status else "Unknown"
+        return status.value.capitalize() if hasattr(status, "value") else str(status)
 
     def create_action_buttons(self, sale):
         buttons = []
+        sale_id = sale["id"]
 
         # View items button
         view_btn = theme.action_button("View", "View items", theme.PRIMARY, 50)
-        view_btn.clicked.connect(lambda: self.view_sale_items(sale.id))
+        view_btn.clicked.connect(lambda: self.view_sale_items(sale_id))
         buttons.append(view_btn)
 
         # Payment history button
         hist_btn = theme.action_button("History", "Payment History", theme.PURPLE, 62)
-        hist_btn.clicked.connect(lambda: self.show_payment_history(sale.id))
+        hist_btn.clicked.connect(lambda: self.show_payment_history(sale_id))
         buttons.append(hist_btn)
 
-        if not sale.items_data:
+        if not sale.get("has_items_data"):
             edit_btn = theme.action_button("Edit", "Edit this sale", theme.WARNING, 46)
-            edit_btn.clicked.connect(lambda: self.edit_sale_requested.emit(sale.id))
+            edit_btn.clicked.connect(lambda: self.edit_sale_requested.emit(sale_id))
             buttons.append(edit_btn)
 
         # Delete button
         delete_btn = theme.action_button("Delete", "Delete Sale", theme.DANGER, 56)
         if self.is_user_admin():
-            delete_btn.clicked.connect(lambda: self.delete_sale(sale.id))
+            delete_btn.clicked.connect(lambda: self.delete_sale(sale_id))
         else:
             delete_btn.setEnabled(False)
             delete_btn.setToolTip("Delete Sale - admin access required")
@@ -3413,55 +3365,21 @@ class AllSalesOverviewDialog(QDialog):
                     user_id = getattr(self.current_user, 'id', None)
             if service.delete_sale_cascade(sale_id, user_id):
                 QMessageBox.information(self, "Deleted", f"Sale #{sale_id} deleted.")
-                self.load_page(reset=True)
+                self.load_data()
             else:
                 QMessageBox.critical(self, "Error", "Delete failed.")
 
     def on_scroll(self, value):
+        """Load the next page of the cached result when the bottom is reached."""
         scrollbar = self.table.verticalScrollBar()
-        if value >= scrollbar.maximum() - 100 and not self.is_loading and not self.all_loaded:
-            self.load_page()
-
-    
-    @staticmethod
-    def _fuzzy_token_match(query_token, row_tokens, threshold=0.6):
-        """Return True if query_token matches any row_token exactly,
-        as a substring, or closely enough to tolerate typos."""
-        for token in row_tokens:
-            if query_token in token or token in query_token:
-                return True
-            if len(query_token) >= 3 and len(token) >= 3:
-                if difflib.SequenceMatcher(None, query_token, token).ratio() >= threshold:
-                    return True
-        return False
-
-    def filter_table(self, text):
-        """Hide rows that do not fuzzy-match the search text in any visible column."""
-        search_lower = text.strip().lower()
-
-        if not search_lower:
-            for row in range(self.table.rowCount()):
-                self.table.setRowHidden(row, False)
-            return
-
-        query_tokens = search_lower.split()
-
-        for row in range(self.table.rowCount()):
-            row_tokens = []
-            for col in range(6):
-                item = self.table.item(row, col)
-                if item and item.text():
-                    row_tokens.extend(item.text().lower().split())
-
-            match = all(
-                self._fuzzy_token_match(qt, row_tokens) for qt in query_tokens
-            )
-            self.table.setRowHidden(row, not match)
+        if value >= scrollbar.maximum() - 100 and not self.is_loading:
+            if (self.current_page - 1) * self.page_size < len(self.filtered_sales):
+                self.render_page()
 
     
     def edit_sale(self, sale):
         """Emit signal to open this sale in the sales manager for editing."""
-        self.edit_sale_requested.emit(sale.id)
+        self.edit_sale_requested.emit(sale["id"])
 
     def is_user_admin(self):
         if not self.current_user:
@@ -3471,17 +3389,13 @@ class AllSalesOverviewDialog(QDialog):
         return getattr(self.current_user, 'is_admin', False)
 
     def closeEvent(self, event):
-        """Stop background thread before closing to avoid accessing deleted widgets."""
+        """Stop the filter timer and detach the loader before closing."""
         self._closed = True
-        self.search_timer.stop()
-        self.date_search_timer.stop()
-        try:
-            if hasattr(self, 'thread') and self.thread is not None and self.thread.isRunning():
-                self.thread.quit()
-                self.thread.wait(2000)
-        except RuntimeError:
-            # Underlying C++ object already deleted – nothing to do
-            pass
+        self.filter_timer.stop()
+        if self.thread is not None:
+            self._retire_thread(self.thread, self.worker)
+            self.thread = None
+            self.worker = None
         event.accept()
 
 

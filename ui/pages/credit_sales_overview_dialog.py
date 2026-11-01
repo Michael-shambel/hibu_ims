@@ -7,8 +7,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QFont, QColor
 from services.new_sale_service import NewSaleService
-from ui.pages.sales_card_dialog import CustomerSalesListDialog
-from ui.pages.credit_payment_dialog import CreditPaymentDialog
+from ui.utils.credit_search import filter_credit_customers
 from ui.utils.worker import Worker
 
 
@@ -29,31 +28,30 @@ class CreditSalesOverviewDialog(QDialog):
         self.sale_service = NewSaleService()
         self.filter_short_term_only = filter_short_term_only
 
-        # Pagination state
+        # Pagination state (client-side over the cached list)
         self.current_page = 1
         self.page_size = 50
         self.total_pages = 1
         self.total_customers = 0
 
         self.summary = {}
-        self.customer_data = []      # data for current page
-        self.filtered_data = []      # filtered subset of current page
+        self.all_customers = []      # full result set, fetched once per reload
+        self.filtered_data = []      # in-memory filter result
         self.search_text = ""
 
         self.is_loading = False
         self.thread = None
         self.worker = None
         self._closed = False
-
-        self.search_version = 0
         self._load_version = 0
-        self.fuzzy_mode = False
-        self._fuzzy_attempted = False
+        self._retiring = []  # abandoned (thread, worker) pairs kept alive until
+                              # they finish on their own, so PySide never destroys
+                              # a QThread while it's still actually running
 
-        # Debounce timer for search to avoid starting too many threads
-        self.search_timer = QTimer()
-        self.search_timer.setSingleShot(True)
-        self.search_timer.timeout.connect(self._do_search)
+        # Small debounce so a fast typing burst rebuilds the table once
+        self.filter_timer = QTimer(self)
+        self.filter_timer.setSingleShot(True)
+        self.filter_timer.timeout.connect(self.apply_filter)
 
         self.init_ui()
         # Maximise to screen
@@ -78,7 +76,7 @@ class CreditSalesOverviewDialog(QDialog):
         search_label = QLabel("Search:")
         search_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Type to filter by customer, status, or amount...")
+        self.search_edit.setPlaceholderText("Type to filter by customer...")
         self.search_edit.setMinimumHeight(35)
         self.search_edit.setStyleSheet("font-size: 14px; padding: 5px;")
         self.search_edit.textChanged.connect(self.filter_table)
@@ -185,39 +183,46 @@ class CreditSalesOverviewDialog(QDialog):
         main_layout.addWidget(self.loading_label)
 
     def refresh_data(self):
-        self.fuzzy_mode = False
-        self._fuzzy_attempted = False
+        self.current_page = 1
         self.load_data()
+
+    def _retire_thread(self, thread, worker):
+        if thread is None:
+            return
+        try:
+            thread.quit()
+        except RuntimeError:
+            return
+        pair = (thread, worker)
+        self._retiring.append(pair)
+
+        def _cleanup():
+            if pair in self._retiring:
+                self._retiring.remove(pair)
+
+        if thread.isFinished():
+            _cleanup()
+        else:
+            thread.finished.connect(_cleanup)
 
     def load_data(self):
         if self.is_loading:
             return
 
-        # Stop any existing thread
+        # Detach any lingering thread instead of blocking on it.
         if self.thread is not None:
-            try:
-                if self.thread.isRunning():
-                    self.thread.quit()
-                    self.thread.wait(1000)
-            except RuntimeError:
-                pass
+            self._retire_thread(self.thread, self.worker)
             self.thread = None
             self.worker = None
 
+        self._load_version += 1
+        version = self._load_version
         self.is_loading = True
-
-        # # Stop any existing thread before starting a new one
-        # try:
-        #     if self.thread is not None and self.thread.isRunning():
-        #         self.thread.quit()
-        #         self.thread.wait(1000)  # Wait up to 1 second for thread to finish
-        # except RuntimeError:
-        #     self.thread = None
         self.loading_label.show()
         self.table.hide()
 
         self.thread = QThread()
-        self.worker = Worker(self._fetch_data)   # <-- will now use current search_text
+        self.worker = Worker(self._fetch_data, version)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.finished.connect(self.on_data_loaded)
@@ -229,63 +234,32 @@ class CreditSalesOverviewDialog(QDialog):
         self.thread.finished.connect(self.thread.deleteLater)
         self.thread.start()
 
-    def _fetch_data(self):
+    def _fetch_data(self, version):
         summary = self.sale_service.get_credit_sales_summary()
-        customers, total = self.sale_service.get_credit_customers_paginated(
-            page=self.current_page,
-            page_size=self.page_size,
-            short_term_only=self.filter_short_term_only,
-            search=self.search_text,
-            fuzzy=self.fuzzy_mode
+        customers = self.sale_service.get_credit_customers_all(
+            short_term_only=self.filter_short_term_only
         )
-        return summary, customers, total
+        return version, summary, customers
 
     def on_data_loaded(self, result):
         if self._closed:
             return
 
-        # Ignore stale results
-        if self._load_version != self.search_version:
-            self.is_loading = False
-            self.loading_label.hide()
-            self.table.show()
+        version, summary, customers = result
+        # Ignore a result from a superseded load. With the is_loading guard
+        # above only one load can be in flight, but keep the check so an
+        # older response can never overwrite a newer one.
+        if version != self._load_version:
             return
 
-        summary, customers, total = result
-
-        # --- Auto-fallback fuzzy logic ---
-        if total == 0 and self.search_text and not self._fuzzy_attempted:
-            self.fuzzy_mode = True
-            self._fuzzy_attempted = True
-            self.is_loading = False
-            QTimer.singleShot(0, self.load_data)  # deferred
-            return
-
-        # Normal processing
         self.summary = summary
-        self.total_customers = total
-        self.total_pages = (total + self.page_size - 1) // self.page_size if total > 0 else 1
-
-        self.prev_btn.setEnabled(self.current_page > 1)
-        self.next_btn.setEnabled(self.current_page < self.total_pages)
-        self.page_label.setText(f"Page {self.current_page} of {self.total_pages} ({total} customers)")
-
-        self.customer_data = customers
-        self.filtered_data = customers.copy()
-
+        self.all_customers = customers
         self.total_unpaid_label.setText(f"Total Unpaid: ${self.summary['total_unpaid']:,.2f}")
 
-        if self.fuzzy_mode and total > 0:
-            self.fuzzy_status_label.setText(
-                f"🔍 Showing fuzzy matches for '{self.search_text}'"
-            )
-            self.fuzzy_status_label.show()
-        else:
-            self.fuzzy_status_label.hide()
-
-        self.populate_table()
+        self.is_loading = False
         self.loading_label.hide()
         self.table.show()
+        self.apply_filter()
 
     def on_error(self, error):
         if self._closed:
@@ -300,26 +274,30 @@ class CreditSalesOverviewDialog(QDialog):
         self.loading_label.hide()
         self.table.show()
 
-    # ================== Pagination ==================
+    # ================== Pagination (client-side) ==================
+    def _page_slice(self):
+        start = (self.current_page - 1) * self.page_size
+        return self.filtered_data[start:start + self.page_size]
+
     def prev_page(self):
         if self.current_page > 1:
             self.current_page -= 1
-            self.load_data()
+            self.apply_filter()
 
     def next_page(self):
         if self.current_page < self.total_pages:
             self.current_page += 1
-            self.load_data()
+            self.apply_filter()
 
     def on_page_size_changed(self, new_size):
         self.page_size = int(new_size)
         self.current_page = 1
-        self.load_data()
+        self.apply_filter()
 
     # ================== Table population ==================
     def populate_table(self, data=None):
         if data is None:
-            data = self.filtered_data
+            data = self._page_slice()
 
         today = date.today()
         self.table.setRowCount(len(data))
@@ -465,28 +443,42 @@ class CreditSalesOverviewDialog(QDialog):
         return item
 
     def filter_table(self, text):
+        """Filter the cached customer list in memory - no DB work, no threads."""
         self.search_text = text.strip()
         self.current_page = 1
-        self.fuzzy_mode = False
-        self._fuzzy_attempted = False
-        self.search_version += 1
-        self.search_timer.start(300)
+        self.filter_timer.start(120)
 
-    def _do_search(self):
-        """Actually perform the search (called after debounce delay)."""
-        # Stop any running thread first
-        try:
-            if self.thread is not None and self.thread.isRunning():
-                self.thread.quit()
-                self.thread.wait(1000)
-        except RuntimeError:
-            self.thread = None
-        # Reset loading state so load_data can proceed
-        self.is_loading = False
-        self._load_version = self.search_version
-        self.load_data()
+    def apply_filter(self):
+        """Rebuild pagination state and the table from the cached list."""
+        self.filtered_data, fuzzy_used = filter_credit_customers(
+            self.all_customers, self.search_text
+        )
+        self.total_customers = len(self.filtered_data)
+        self.total_pages = (
+            (self.total_customers + self.page_size - 1) // self.page_size
+            if self.total_customers > 0 else 1
+        )
+        if self.current_page > self.total_pages:
+            self.current_page = self.total_pages
+
+        self.prev_btn.setEnabled(self.current_page > 1)
+        self.next_btn.setEnabled(self.current_page < self.total_pages)
+        self.page_label.setText(
+            f"Page {self.current_page} of {self.total_pages} ({self.total_customers} customers)"
+        )
+
+        if fuzzy_used and self.search_text:
+            self.fuzzy_status_label.setText(
+                f"🔍 Showing fuzzy matches for '" + self.search_text + "'"
+            )
+            self.fuzzy_status_label.show()
+        else:
+            self.fuzzy_status_label.hide()
+
+        self.populate_table(self._page_slice())
 
     def view_customer_sales(self, cust):
+        from ui.pages.sales_card_dialog import CustomerSalesListDialog
         dialog = CustomerSalesListDialog(
             self,
             cust['customer_name'],
@@ -498,6 +490,7 @@ class CreditSalesOverviewDialog(QDialog):
         dialog.show()
 
     def pay_customer(self, cust):
+        from ui.pages.credit_payment_dialog import CreditPaymentDialog
         dialog = CreditPaymentDialog(
             self,
             customer_id=cust['customer_id'],
@@ -522,6 +515,7 @@ class CreditSalesOverviewDialog(QDialog):
 
     def closeEvent(self, event):
         self._closed = True
+        self.filter_timer.stop()
 
         if self.worker is not None:
             try:
@@ -530,9 +524,9 @@ class CreditSalesOverviewDialog(QDialog):
             except (RuntimeError, TypeError):
                 pass
 
-        try:
-            if hasattr(self, 'thread') and self.thread is not None and self.thread.isRunning():
-                self.thread.quit()
-        except RuntimeError:
-            pass
+        if self.thread is not None:
+            self._retire_thread(self.thread, self.worker)
+            self.thread = None
+            self.worker = None
+
         event.accept()
